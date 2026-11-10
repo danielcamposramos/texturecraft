@@ -186,6 +186,8 @@ impl Assets for Package<'_> {
 struct Loose<'f> {
     found: &'f mut dyn FnMut(&str) -> Option<Vec<u8>>,
     files: Vec<(String, Vec<u8>)>,
+    /// Bytes of the texture files kept so far, plus the layer.
+    total: u64,
 }
 
 impl Assets for Loose<'_> {
@@ -195,6 +197,10 @@ impl Assets for Loose<'_> {
             return Some(data.clone());
         }
         let data = (self.found)(asset).filter(|d| d.len() as u64 <= MAX_TEXTURE_BYTES)?;
+        self.total = self.total.saturating_add(data.len() as u64);
+        if self.total > MAX_MESH_FILE_BYTES {
+            return None; // over budget: stop collecting; reported in package()
+        }
         self.files.push((name?, data.clone()));
         Some(data)
     }
@@ -205,16 +211,15 @@ impl Assets for Loose<'_> {
 pub(crate) fn package(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
     crate::guard(KIND, || {
         let layer = read_layer(bytes)?;
-        let mut loose = Loose { found, files: Vec::new() };
+        let mut loose = Loose { found, files: Vec::new(), total: bytes.len() as u64 };
         let mut stage = Stage::new(&layer);
         for p in layer.prims.iter().filter(|p| p.type_name == "Material") {
             stage.base_color(&p.name, Some(&mut loose));
         }
-        if loose.files.is_empty() {
+        if loose.files.is_empty() && loose.total <= MAX_MESH_FILE_BYTES {
             return Ok(None);
         }
-        let total = loose.files.iter().fold(bytes.len() as u64, |t, (_, d)| t.saturating_add(d.len() as u64));
-        if total > MAX_MESH_FILE_BYTES {
+        if loose.total > MAX_MESH_FILE_BYTES {
             return Err(FormatError::TooLarge("the USD layer and its textures exceed 2 GiB".into()));
         }
         let leaf = std::path::Path::new(file_name).file_name().and_then(|n| n.to_str()).unwrap_or("layer.usd");

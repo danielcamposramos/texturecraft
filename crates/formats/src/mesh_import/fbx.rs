@@ -465,12 +465,17 @@ pub(crate) fn package(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str)
     }
     crate::guard(KIND, || {
         let (mut files, mut missing): (Vec<(String, Vec<u8>)>, Vec<String>) = (Vec::new(), Vec::new());
+        let mut total = bytes.len() as u64;
         read_inner(bytes, &mut |paths| {
             if let Some((_, data)) = files.iter().find(|(n, _)| paths.iter().any(|p| below(p).as_ref() == Some(n))) {
                 return Some(data.clone());
             }
             for p in paths {
                 if let (Some(name), Some(data)) = (below(p), found(p).filter(|d| d.len() as u64 <= MAX_TEXTURE_BYTES)) {
+                    total = total.saturating_add(data.len() as u64);
+                    if total > MAX_MESH_FILE_BYTES {
+                        return None; // over budget: stop collecting; reported below
+                    }
                     files.push((name, data.clone()));
                     return Some(data);
                 }
@@ -481,10 +486,9 @@ pub(crate) fn package(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str)
             }
             None
         })?;
-        if files.is_empty() {
+        if files.is_empty() && total <= MAX_MESH_FILE_BYTES {
             return Ok((None, missing));
         }
-        let total = files.iter().fold(bytes.len() as u64, |t, (_, d)| t.saturating_add(d.len() as u64));
         if total > MAX_MESH_FILE_BYTES {
             return Err(FormatError::TooLarge("the FBX and its textures exceed 2 GiB".into()));
         }

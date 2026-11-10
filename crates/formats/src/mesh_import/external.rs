@@ -57,7 +57,18 @@ pub fn self_contained_mesh(name: &str, bytes: Vec<u8>, read: &mut dyn FnMut(&str
 pub fn read_mesh_file(path: &std::path::Path) -> Result<MeshFile> {
     let bytes = crate::read_capped(path, MAX_MESH_FILE_BYTES)?;
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
-    self_contained_mesh(&path.to_string_lossy(), bytes, &mut |rel| crate::read_capped(&dir.join(rel), MAX_MESH_FILE_BYTES).ok())
+    // Canonicalize so a symlink inside the folder cannot lead outside it. FBX and USD only
+    // reference textures (capped on use, so cap the read too); glTF buffers may be large.
+    let cap = if matches!(super::extension(&path.to_string_lossy()).as_str(), "fbx" | "usd" | "usda" | "usdc") {
+        super::MAX_TEXTURE_BYTES
+    } else {
+        MAX_MESH_FILE_BYTES
+    };
+    let root = dir.canonicalize().ok();
+    self_contained_mesh(&path.to_string_lossy(), bytes, &mut |rel| {
+        let full = dir.join(rel).canonicalize().ok()?;
+        full.starts_with(root.as_ref()?).then(|| crate::read_capped(&full, cap).ok()).flatten()
+    })
 }
 
 /// `asset` as a path below the mesh's folder (`/`-separated, `.` and `..` resolved), or None when
@@ -143,5 +154,23 @@ mod tests {
         assert_eq!(self_contained_mesh("a.obj", obj.clone(), &mut read).unwrap(), MeshFile { name: "a.obj".into(), bytes: obj, warnings: vec![] });
         let gltf = br#"{"asset": {"version": "2.0"}, "buffers": [{"uri": "data:application/octet-stream;base64,AAAA", "byteLength": 3}]}"#.to_vec();
         assert_eq!(self_contained_mesh("a.gltf", gltf.clone(), &mut read).unwrap().bytes, gltf);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod symlink_tests {
+    #[test]
+    fn a_symlink_out_of_the_mesh_folder_is_not_read() {
+        let base = std::env::temp_dir().join(format!("tc-symlink-{}", std::process::id()));
+        let (mesh_dir, outside) = (base.join("mesh"), base.join("outside"));
+        std::fs::create_dir_all(&mesh_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.png"), b"secret").unwrap();
+        std::os::unix::fs::symlink(&outside, mesh_dir.join("tex")).unwrap();
+        let gltf = br#"{"asset":{"version":"2.0"},"images":[{"uri":"tex/secret.png"}]}"#;
+        std::fs::write(mesh_dir.join("m.gltf"), gltf).unwrap();
+        let file = super::read_mesh_file(&mesh_dir.join("m.gltf")).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!String::from_utf8_lossy(&file.bytes).contains("c2VjcmV0"), "symlinked file was embedded");
     }
 }

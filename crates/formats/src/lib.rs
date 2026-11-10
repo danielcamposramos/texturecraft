@@ -92,7 +92,7 @@ pub const MAX_IMAGE_SIZE: u32 = 16_384;
 
 /// Read a whole file, refusing files over `cap` bytes.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn read_capped(path: &std::path::Path, cap: u64) -> Result<Vec<u8>> {
+pub fn read_capped(path: &std::path::Path, cap: u64) -> Result<Vec<u8>> {
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
         return Err(FormatError::Invalid(format!("{} is not a regular file", path.display())));

@@ -803,12 +803,20 @@ pub fn layout_file(app: &mut TextureCraftApp, save: bool) {
                 .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
                 .map(|_| trf("Saved UI layout {path}", &[("path", &path.display())]))
         } else {
-            std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| serde_json::from_slice::<crate::UiState>(&bytes).map_err(|e| e.to_string())).map(
-                |layout| {
+            // A layout file is small; refuse to read more than 16 MiB.
+            std::fs::File::open(path)
+                .and_then(|f| {
+                    use std::io::Read as _;
+                    let mut bytes = Vec::new();
+                    f.take((16 << 20) + 1).read_to_end(&mut bytes).map(|_| bytes)
+                })
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| if bytes.len() > 16 << 20 { Err("layout file is larger than 16 MiB".to_string()) } else { Ok(bytes) })
+                .and_then(|bytes| serde_json::from_slice::<crate::UiState>(&bytes).map_err(|e| e.to_string()))
+                .map(|layout| {
                     app.ui.adopt_layout(layout);
                     trf("Loaded UI layout {path}", &[("path", &path.display())])
-                },
-            )
+                })
         };
         match result {
             Ok(msg) => app.toast(msg, false),

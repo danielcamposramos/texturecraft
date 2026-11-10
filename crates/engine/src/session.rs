@@ -672,6 +672,9 @@ impl Session {
     }
 
     fn after_history(&mut self, other: &Document) {
+        // Ids are never handed out twice, even after an undo: links outside the document (such as
+        // a PhotoCraft hand-off's record) name layers by id, and must not find a later layer.
+        self.doc.project.next_id = self.doc.project.next_id.max(other.project.next_id);
         self.modified = true;
         self.revision = self.revision.wrapping_add(1);
         self.invalidate_changed(other);

@@ -209,19 +209,18 @@ impl Tree<'_> {
             }
             let node = match &layer.kind {
                 LayerKind::Group { children, .. } => {
-                    // A folder has one blend mode and opacity in the PSD; TextureCraft has one per channel.
-                    let first = enabled.first().map(|(_, b)| *b).unwrap_or_default();
-                    let uniform = enabled.iter().all(|(_, b)| b.mode == first.mode && (b.opacity - first.opacity).abs() < 1e-4);
-                    let (blend, opacity) = if uniform {
-                        let (key, note) = psd_key(first.mode);
-                        if let Some(note) = note {
-                            self.warn(&layer.name, note);
-                        }
-                        (key, first.opacity)
+                    // A TextureCraft folder blends its children with the layers below it and then mixes
+                    // the result in by its opacity, whatever its mode: a pass-through group. An
+                    // isolated PSD group would render a Multiply child differently. The PSD has one
+                    // opacity per group; TextureCraft has one per channel.
+                    let first = enabled.first().map(|(_, b)| b.opacity).unwrap_or(1.0);
+                    let opacity = if enabled.iter().all(|(_, b)| (b.opacity - first).abs() < 1e-4) {
+                        first
                     } else {
-                        self.warn(&layer.name, "the folder blends its channels differently; it is sent as a pass-through group at 100%");
-                        (*b"pass", 1.0)
+                        self.warn(&layer.name, "the folder's channels have different opacities; it is sent at 100%");
+                        1.0
                     };
+                    let blend = *b"pass";
                     let id_ = self.id(Role::Folder(id));
                     let children = self.nodes(children, depth + 1)?;
                     psd::Layer {

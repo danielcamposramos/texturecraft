@@ -788,6 +788,10 @@ mod tests {
         execute(&mut s, "layer.rename", &json!({"layer": fill.0, "name": "Red"})).unwrap();
         execute(&mut s, "mask.add.black", &Value::Null).unwrap();
         execute(&mut s, "layer.group", &json!({"layer": fill.0})).unwrap();
+        // TextureCraft folders blend their children with what is below them whatever their mode,
+        // so even a Normal folder is a pass-through group in the PSD.
+        let folder = s.doc.project.locate(fill).unwrap().1.unwrap();
+        execute(&mut s, "layer.blend", &json!({"layer": folder.0, "channel": "all", "mode": "Normal", "opacity": 0.5})).unwrap();
         let r = execute(&mut s, SEND, &json!({"dir": dir.path().display().to_string(), "channels": ["baseColor", "roughness"], "open": false})).unwrap();
         let files = r["files"].as_array().unwrap();
         assert_eq!(files.len(), 1, "{r}");
@@ -799,6 +803,8 @@ mod tests {
         // Top-first: the folder holding "Red", then the project's first paint layer.
         assert_eq!(doc.layers.len(), 2, "{:?}", doc.layers.iter().map(|l| &l.name).collect::<Vec<_>>());
         assert!(find(children(&doc.layers[0]), "Red").is_some());
+        assert_eq!(&doc.layers[0].blend, b"pass");
+        assert!((doc.layers[0].opacity - 0.5).abs() < 0.01);
         assert_eq!(doc.layers[1].name, "Layer 1");
         // A paint layer without a mask hides nothing, so its group has no mask (also where it
         // holds no paint).
@@ -1013,6 +1019,40 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_made_after_undoing_an_update_is_not_taken_for_the_undone_one() {
+        let dir = tempdir("psd_undo");
+        let mut s = session();
+        let (path, doc) = send_psd(&mut s, &dir);
+        let (w, h) = s.caches[0].size;
+        let with = |px: [u16; 4]| {
+            let mut layers = vec![psd::Layer { id: 1, ..new_layer("Base Color", (w, h), px, true) }];
+            layers.extend(doc.layers.iter().map(|n| rewrite(n, (w, h))));
+            layers
+        };
+        save(&path, with([0, 65535, 0, 65535]), (w, h), 1);
+        assert_eq!(s.sync_photocraft().len(), 1);
+        let imported = by_name(&s, "Base Color");
+        execute(&mut s, "edit.undo", &Value::Null).unwrap();
+        // A layer made now must not get the undone layer's id...
+        execute(&mut s, "layer.add.fill", &json!({"roughness": 0.3})).unwrap();
+        let fill = s.selected_layer().unwrap();
+        assert_ne!(fill, imported);
+        // ...so the next save, which still names that id, leaves the fill alone.
+        save(&path, with([65535, 0, 0, 65535]), (w, h), 2);
+        assert_eq!(s.sync_photocraft().len(), 1);
+        let l = s.doc.project.layer(fill).unwrap();
+        assert!(matches!(l.kind, LayerKind::Fill(_)));
+        assert!(l.channels.contains_key(&Channel::Roughness) && l.channels.contains_key(&Channel::BaseColor), "{:?}", l.channels);
+        let again = by_name(&s, "Base Color");
+        assert!(s.doc.pixels.layer(again, Channel::BaseColor).is_some());
+        // Redo after an undo hands out no id twice either.
+        execute(&mut s, "edit.undo", &Value::Null).unwrap();
+        execute(&mut s, "edit.redo", &Value::Null).unwrap();
+        let next = s.doc.project.next_id;
+        assert!(s.doc.project.layers.keys().all(|id| id.0 < next));
+    }
+
+    #[test]
     fn edits_to_sent_layers_change_those_layers_and_removals_remove_them() {
         let dir = tempdir("psd_edit");
         let mut s = session();
@@ -1054,7 +1094,10 @@ mod tests {
         assert!(s.log.iter().any(|l| l.contains("now a paint layer")), "{:?}", s.log);
         // One undo brings it all back.
         execute(&mut s, "edit.undo", &Value::Null).unwrap();
-        assert_eq!(s.doc.project, before.project);
+        let mut restored = s.doc.project.clone();
+        restored.next_id = before.project.next_id;
+        assert_eq!(restored, before.project);
+        assert!(s.doc.project.next_id >= before.project.next_id, "ids are not handed out twice");
     }
 
     #[test]

@@ -901,11 +901,14 @@ pub fn read_psd(bytes: &[u8]) -> Result<ReadDocument> {
                     _ => {}
                 }
             }
-            let pixels = (rec.section.is_none() || rec.section == Some(0)).then(|| ReadKind::Pixels {
-                x: rec.rect.1,
-                y: rec.rect.0,
-                image: interleave(&planes, (rw, rh)),
-            });
+            let pixels = if rec.section.is_none() || rec.section == Some(0) {
+                // The interleaved image is allocated whatever channels the record has.
+                let need = (rw as u64).saturating_mul(rh as u64).saturating_mul(8);
+                budget = budget.checked_sub(need).ok_or_else(|| FormatError::TooLarge("the document's layers are too large to read back".into()))?;
+                Some(ReadKind::Pixels { x: rec.rect.1, y: rec.rect.0, image: interleave(&planes, (rw, rh)) })
+            } else {
+                None
+            };
             let mask = match rec.mask {
                 Some((mrect, default, true)) => {
                     let (mw, mh) = rect_size(mrect)?;
@@ -1115,6 +1118,46 @@ mod tests {
         let ReadKind::Pixels { image, .. } = &doc.layers[0].kind else { panic!() };
         assert_eq!(doc.layers[0].name, "A");
         assert_eq!(&image.data[4..8], &[10 * 257, 20 * 257, 30 * 257, 65535]);
+    }
+
+    #[test]
+    fn a_huge_layer_without_channels_is_refused_before_it_is_allocated() {
+        // One pixel layer claiming 30000×30000 texels but storing no channels: nothing to decode,
+        // yet its image would take 7 GB.
+        let mut rec = Vec::new();
+        for v in [0, 0, 30000, 30000] {
+            rec.i32(v);
+        }
+        rec.u16(0);
+        rec.bytes(b"8BIMnorm");
+        rec.bytes(&[255, 0, 8, 0]);
+        rec.u32(12);
+        rec.u32(0); // no mask
+        rec.u32(0); // no blending ranges
+        rec.bytes(&[0, 0, 0, 0]); // empty name, padded
+        let mut info = Vec::new();
+        info.i16(1);
+        info.bytes(&rec);
+        let mut section = Vec::new();
+        section.u32(info.len() as u32);
+        section.bytes(&info);
+        section.u32(0);
+        let mut f = Vec::new();
+        f.bytes(b"8BPS");
+        f.u16(1);
+        f.bytes(&[0; 6]);
+        f.u16(4);
+        f.u32(1);
+        f.u32(1);
+        f.u16(16);
+        f.u16(3);
+        f.u32(0);
+        f.u32(0);
+        f.u32(section.len() as u32);
+        f.bytes(&section);
+        f.u16(0);
+        f.bytes(&[0; 8]);
+        assert!(matches!(read_psd(&f), Err(FormatError::TooLarge(_))), "{:?}", read_psd(&f).map(|d| d.layers.len()));
     }
 
     #[test]

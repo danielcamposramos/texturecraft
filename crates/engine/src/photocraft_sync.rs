@@ -182,10 +182,10 @@ impl Apply<'_> {
                     let id = self.s.doc.project.alloc_id();
                     let mut layer = Layer::new(id, node.name.clone(), LayerKind::Group { children: Vec::new(), collapsed: false }, &self.channels);
                     layer.visible = node.visible;
-                    let mode = if &node.blend == b"pass" { BlendMode::Passthrough } else { mode_of(&node.blend) };
                     for b in layer.channels.values_mut() {
-                        *b = ChannelBlend { mode, opacity: node.opacity };
+                        *b = ChannelBlend { mode: BlendMode::Passthrough, opacity: node.opacity };
                     }
+                    self.isolated_note(node);
                     self.s.doc.project.layers.insert(id, layer);
                     self.placed.insert(id);
                     let grid = self.grid(node.mask.as_ref(), inherit);
@@ -225,21 +225,25 @@ impl Apply<'_> {
         (rec.is_some_and(|r| r.blend != node.blend), rec.is_some_and(|r| r.opacity != opacity))
     }
 
+    /// A folder's opacity, when PhotoCraft changed it. Folders always pass through in
+    /// TextureCraft, so another blend mode on the group only gets a note.
     fn folder_blend(&mut self, f: LayerId, node: &ReadLayer) -> Result<()> {
         let (blend, opacity) = self.changed_blend(node);
-        if !blend && !opacity {
-            return Ok(());
+        if blend {
+            self.isolated_note(node);
         }
-        let mode = if &node.blend == b"pass" { BlendMode::Passthrough } else { mode_of(&node.blend) };
-        for b in self.layer_mut(f)?.channels.values_mut().filter(|b| b.mode != BlendMode::Disable) {
-            if blend {
-                b.mode = mode;
-            }
-            if opacity {
+        if opacity {
+            for b in self.layer_mut(f)?.channels.values_mut().filter(|b| b.mode != BlendMode::Disable) {
                 b.opacity = node.opacity;
             }
         }
         Ok(())
+    }
+
+    fn isolated_note(&mut self, node: &ReadLayer) {
+        if &node.blend != b"pass" {
+            self.note(format!("\"{}\": folders in TextureCraft pass through, so the group's blend mode is not kept", node.name));
+        }
     }
 
     /// The mask of `node`, when PhotoCraft changed it.

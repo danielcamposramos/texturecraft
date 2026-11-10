@@ -346,8 +346,10 @@ else on `PATH`). The menu item sends every texture set.
 written from the public file format specification), holding every channel so that a mask edited
 once shapes all of them:
 
-- Every folder is a group, with the folder's mask and, when all its channels blend alike, their
-  blend mode and opacity (otherwise a pass-through group at 100%, with a warning).
+- Every folder is a pass-through group with the folder's mask and, when all its channels share one,
+  its opacity (otherwise 100%, with a warning). A TextureCraft folder blends its children with the
+  layers below it and mixes the result in by its opacity, whatever its mode, which is what a
+  pass-through group does; an isolated group would render a Multiply child differently.
 - Every layer is a pass-through group of the same name. The layer's mask (painted, generators,
   filters, geometry and height masks included) is the group's own editable layer mask; it is left
   out when it hides nothing.
@@ -373,13 +375,14 @@ stack** in one undo step:
 
 - A group sent as a folder stays that folder, and a group sent as a layer stays that layer; their
   names, visibility, order and masks follow the document. An edited mask becomes a painted mask
-  (generators and filters it had are replaced by the result). A folder's changed blend mode or
-  opacity applies to all its channels; a layer group's changed opacity scales its channels'.
+  (generators and filters it had are replaced by the result). A folder's changed opacity
+  applies to all its channels (a blend mode other than pass-through only gets a note, since
+  folders always pass through); a layer group's changed opacity scales its channels'.
 - A channel pixel layer whose pixels changed becomes that channel's paint. A fill, instance or
   other procedural layer becomes a paint layer first, keeping its other channels as they rendered
   (its content effects are baked in). A changed blend mode or opacity applies to that channel. A
   removed channel layer turns the channel off.
-- A new group becomes a folder (pass-through stays pass-through). A new pixel layer becomes a paint
+- A new group becomes a pass-through folder with its opacity and mask. A new pixel layer becomes a paint
   layer of the same name, painted in the channel its name says: an id or label in any case and
   spacing (`Base Color`, `base_color 2`, `rough copy`) or a common name (`Albedo`, `Diffuse`,
   `Bump`, `Metalness`, `Gloss`, ...). Its transparency and own mask become its coverage. When the

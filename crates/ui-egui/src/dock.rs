@@ -448,7 +448,25 @@ fn layer_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, depth: usize
     let ch = app.ui.layer_channel;
     let blend_rect = Rect::from_min_size(pos2(rect.right() - right_w - 2.0, rect.top() + 3.0), vec2(right_w, 16.0));
     let op_rect = Rect::from_min_size(pos2(rect.right() - right_w - 2.0, rect.top() + 19.0), vec2(right_w, 16.0));
-    if let Some(b) = blend {
+    // A paint layer with no channel on (its name named none) offers the picker even when the
+    // displayed channel is the one holding its pixels.
+    if let Some(choices) = channel_choices(app, layer) {
+        let r = ui
+            .interact(blend_rect.union(op_rect), ui.scope_id().with(("assign", layer.id.0)), Sense::click())
+            .on_hover_text(tr("This layer has no channel on: choose the channel its painting is for"));
+        p.text(blend_rect.right_center() - vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, ic::WARNING, egui::FontId::proportional(12.0), tk.warning);
+        p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, ic::CARET_DOWN, egui::FontId::proportional(8.0), tk.text_dim);
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(160.0);
+            ui.label(RichText::new(tr("Choose channel")).strong());
+            for c in choices {
+                if ui.button(tr(c.label())).clicked() {
+                    app.run("layer.assignChannel", json!({"layer": layer.id.0, "channel": c.id()}));
+                    ui.close();
+                }
+            }
+        });
+    } else if let Some(b) = blend {
         let br = ui.interact(blend_rect, ui.scope_id().with(("blend", layer.id.0)), Sense::click()).on_hover_text(tr("Blending mode of the displayed channel"));
         p.text(blend_rect.right_center() - vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, b.mode.short(), egui::FontId::proportional(11.0), tk.text);
         p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, ic::CARET_DOWN, egui::FontId::proportional(8.0), tk.text_dim);
@@ -478,23 +496,6 @@ fn layer_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, depth: usize
         if r.changed() {
             app.run("layer.blend", json!({"layer": layer.id.0, "channel": ch.id(), "opacity": op / 100.0}));
         }
-    } else if let Some(choices) = channel_choices(app, layer) {
-        // A paint layer brought in with no channel on (its name named none): pick one here.
-        let r = ui
-            .interact(blend_rect.union(op_rect), ui.scope_id().with(("assign", layer.id.0)), Sense::click())
-            .on_hover_text(tr("This layer has no channel on: choose the channel its painting is for"));
-        p.text(blend_rect.right_center() - vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, ic::WARNING, egui::FontId::proportional(12.0), tk.warning);
-        p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, ic::CARET_DOWN, egui::FontId::proportional(8.0), tk.text_dim);
-        egui::Popup::menu(&r).show(|ui| {
-            ui.set_min_width(160.0);
-            ui.label(RichText::new(tr("Choose channel")).strong());
-            for c in choices {
-                if ui.button(tr(c.label())).clicked() {
-                    app.run("layer.assignChannel", json!({"layer": layer.id.0, "channel": c.id()}));
-                    ui.close();
-                }
-            }
-        });
     } else {
         p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, tr("off"), egui::FontId::proportional(11.0), tk.text_dim);
     }

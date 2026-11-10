@@ -191,7 +191,8 @@ fn escape(s: &str) -> String {
     out
 }
 
-fn png16(img: &Rgba16) -> Result<Vec<u8>> {
+/// `img` as a 16-bit RGBA PNG.
+pub fn png16(img: &Rgba16) -> Result<Vec<u8>> {
     use image::ImageEncoder;
     let bytes: Vec<u8> = img.data.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let mut out = Cursor::new(Vec::new());

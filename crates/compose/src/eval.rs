@@ -2200,10 +2200,25 @@ pub fn effect_histogram(inp: &Inputs, effect: LayerId, channel: Channel, bins: u
 /// One flattened tile of one channel: (channel, tile, premultiplied value + coverage data).
 pub type FlatTile = (Channel, (u32, u32), Vec<u16>);
 
+/// One tile of a layer's mask (with its geometry mask and mask with height), u16 per texel.
+pub type MaskTile = ((u32, u32), Vec<u16>);
+
 /// Flatten one paint or fill layer: its content (with content effects) times its mask, as
 /// premultiplied (value, coverage) tiles per enabled channel, ready to become a plain paint
 /// layer. Groups are not supported (None).
 pub fn flatten_layer(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)]) -> Option<Vec<FlatTile>> {
+    flatten(inputs, id, tiles, false).map(|(content, _)| content)
+}
+
+/// [`flatten_layer`] with the mask kept apart: the content tiles hold the content alone
+/// (premultiplied by its own coverage), and the mask tiles the layer's mask as it shapes the
+/// content (geometry mask and mask with height included), over the same tiles. For an image
+/// editor's layer mask. Groups are not supported (None).
+pub fn flatten_layer_masked_apart(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)]) -> Option<(Vec<FlatTile>, Vec<MaskTile>)> {
+    flatten(inputs, id, tiles, true)
+}
+
+fn flatten(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)], apart: bool) -> Option<(Vec<FlatTile>, Vec<MaskTile>)> {
     let set = inputs.project.texture_set(inputs.ts).ok()?;
     if inputs.project.content_layer(id)?.is_group() {
         return None;
@@ -2219,11 +2234,12 @@ pub fn flatten_layer(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)]) -> Opti
     let visible_inputs = Inputs { project: &solo, preview: None, block_scales: inputs.block_scales.clone(), ..*inputs };
     let fields = neighbourhood_fields(&visible_inputs, &channels, tiles);
 
-    let out: Vec<Vec<FlatTile>> = tiles
+    let out: Vec<(Vec<FlatTile>, Option<MaskTile>)> = tiles
         .par_iter()
         .map(|&(tx, ty)| {
             let nodes = plan(&visible_inputs, &[id], &channels, tx, ty, 0, Some(&fields));
-            let Some(n) = nodes.first() else { return Vec::new() };
+            let Some(n) = nodes.first() else { return (Vec::new(), None) };
+            let mut mask = apart.then(|| vec![0u16; TILE_AREA]);
             let full = anchor_plan(&visible_inputs, id, &channels, tx, ty, Some(&fields));
             let mut buffers: Vec<(Channel, Vec<u16>, bool)> =
                 n.chans.iter().filter_map(|c| Channel::ALL.get(c.ch).map(|ch| (*ch, vec![0u16; TILE_AREA * (c.comps + 1)], false))).collect();
@@ -2241,6 +2257,11 @@ pub fn flatten_layer(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)]) -> Opti
                     tex.anchors_below(&full, id);
                 }
                 let m = tex.node_mask(n);
+                if let Some(slot) = mask.as_mut().and_then(|t| t.get_mut(o)) {
+                    *slot = to_u16(m);
+                }
+                // Kept apart, the mask leaves the content's own coverage alone.
+                let m = if apart { 1.0 } else { m };
                 for (c, (ch, buffer, any)) in n.chans.iter().zip(buffers.iter_mut()) {
                     let Some((v, cov)) = tex.content(&n.content, c) else { continue };
                     let a = (cov * m).clamp(0.0, 1.0);
@@ -2260,11 +2281,18 @@ pub fn flatten_layer(inputs: &Inputs, id: LayerId, tiles: &[(u32, u32)]) -> Opti
                 }
             }
 
-            buffers.into_iter().filter(|(_, _, any)| *any).map(|(ch, buffer, _)| (ch, (tx, ty), buffer)).collect()
+            let content = buffers.into_iter().filter(|(_, _, any)| *any).map(|(ch, buffer, _)| (ch, (tx, ty), buffer)).collect();
+            (content, mask.map(|m| ((tx, ty), m)))
         })
         .collect();
 
-    Some(out.into_iter().flatten().collect())
+    let mut content = Vec::new();
+    let mut masks = Vec::new();
+    for (c, m) in out {
+        content.extend(c);
+        masks.extend(m);
+    }
+    Some((content, masks))
 }
 
 #[cfg(test)]

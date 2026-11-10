@@ -39,6 +39,7 @@ pub mod orb_preview;
 pub mod painting;
 pub mod path_tool;
 pub mod photocraft_cmds;
+pub mod photocraft_psd;
 mod polygon_fill;
 mod polygon_fill_drag;
 // Mesh reimport reads files: native only.

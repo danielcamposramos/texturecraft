@@ -338,25 +338,49 @@ OpenGL convention, `roughness`, `metallic`, `height`, `ambientOcclusion`, `emiss
 
 ## PhotoCraft hand-off
 
-`file.sendToPhotoCraft` (File › Send layers to PhotoCraft...) writes the texture set's stack as layered
-OpenRaster documents (`formats::ora`), one per texture set and channel, named
-`<mesh>_<set>_<channel>.ora`, and opens them in PhotoCraft (`$PHOTOCRAFT`, else `photocraft` next to the
-TextureCraft executable, else on `PATH`). Each layer is rendered alone into a layer of the same name:
-its fill sources, generators, filters and content effects, times its mask, so the mask becomes the
-layer's transparency. Folders become groups (pass-through folders `isolation="auto"`), with the
-channel's visibility, opacity and blend mode (`svg:*` names; modes OpenRaster lacks are sent as
-Normal with a warning). Colour channels are sRGB, data channels as stored (height `0.5 + 0.5·h`,
-normals OpenGL), 16-bit with straight alpha; `mergedimage.png` is the set's composite.
+`file.sendToPhotoCraft` (File › Send layers to PhotoCraft...) writes texture sets as layered documents
+and opens them in PhotoCraft (`$PHOTOCRAFT`, else `photocraft` next to the TextureCraft executable,
+else on `PATH`). The menu item sends every texture set.
 
-Each sent file is a link. When PhotoCraft saves it, its `mergedimage.png` becomes the image source of a
-`PhotoCraft: <channel>` fill at the top of the set (one undo step per save; the layers below are
-untouched). The desktop app looks at the files' modification times about twice a second and never
-during a stroke. Links last for the session and are not saved with the project.
+**PSD (the default).** One 16-bit document per texture set, `<mesh>_<set>.psd` (`formats::psd`,
+written from the public file format specification), holding every channel so that a mask edited
+once shapes all of them:
+
+- Every folder is a group, with the folder's mask and, when all its channels blend alike, their
+  blend mode and opacity (otherwise a pass-through group at 100%, with a warning).
+- Every layer is a pass-through group of the same name. The layer's mask (painted, generators,
+  filters, geometry and height masks included) is the group's own editable layer mask; it is left
+  out when it hides nothing.
+- Inside each layer group, one pixel layer per enabled channel, named after it (`Base color`,
+  `Roughness`, `Metallic`, `Height`, ...), holds the layer's content for that channel (fill sources,
+  generators, filters and content effects, not masked), with the channel's opacity and blend mode
+  (modes the format lacks are sent as Normal with a warning).
+- One layer comp per channel shows only that channel's layers; the document opens on the first.
+  The merged image is the first channel's composite.
+
+**OpenRaster** (`format: "ora"`). One document per texture set and channel,
+`<mesh>_<set>_<channel>.ora` (`formats::ora`). Each layer is rendered alone, times its mask, so the
+mask becomes the layer's transparency; folders become groups (pass-through folders
+`isolation="auto"`) with the channel's visibility, opacity and blend mode (`svg:*` names).
+
+In both, colour channels are sRGB and data channels as stored (height `0.5 + 0.5·h`, normals
+OpenGL), 16-bit with straight alpha.
+
+Each sent file is a link. When PhotoCraft saves it, TextureCraft reads it back and every channel it
+holds becomes the image source of a `PhotoCraft: <channel>` fill at the top of the set, all in one
+undo step (the layers below are untouched). An OpenRaster file brings back its `mergedimage.png`. A
+PSD is recomposited per channel with TextureCraft's blend math: starting from the channel's default
+value, every pixel layer named after the channel is blended in through the masks, opacity and
+visibility of the groups above it; the pixel layers' own visibility is ignored, since layer comps
+toggle it. Layers not named after a channel are skipped with a note in the log. A PSD whose size no
+longer matches the texture set is refused. The desktop app looks at the files' modification times
+about twice a second and never during a stroke. Links last for the session and are not saved with
+the project.
 
 | Command | Params |
 |---|---|
-| `file.sendToPhotoCraft` | `{dir, ts?: index\|"all" (default: the active set), channels?: [ids], open?: true}` → `{files, warnings}` |
-| `photocraft.links` | `{}` → `[{path, ts, channel, layer?}]` |
+| `file.sendToPhotoCraft` | `{dir, ts?: index\|"all" (default: the active set), channels?: [ids], format?: "psd"\|"ora" (default psd), open?: true}` → `{files, warnings}` |
+| `photocraft.links` | `{}` → `[{path, ts, format, channels, layers: {channel: layer id}}]` |
 | `photocraft.sync` | `{}` → `{updated}`: read the linked files saved since the last look now |
 | `photocraft.unlink` | `{path?}`: stop watching one file, or all |
 

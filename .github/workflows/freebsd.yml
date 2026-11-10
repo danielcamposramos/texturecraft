@@ -33,4 +33,9 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/freebsd.yml@main
     with:
       craft-fonts-ref: aced4137c022f1f587624d48e81ec77e1914a9cc
+      # The VM's software Vulkan driver crashes (SIGSEGV) when several tests set up a device at
+      # once (photocraft serializes its GPU tests for the same reason), so tests run one at a
+      # time. The whole workspace is tested in one command: excluding packages would change
+      # feature unification and build winit without its X11/Wayland backends.
+      cargo-test-extra-args: "-- --test-threads=1"
       run-package-check: true

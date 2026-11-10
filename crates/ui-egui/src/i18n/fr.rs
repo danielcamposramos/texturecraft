@@ -747,6 +747,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Select source", "Sélectionner la source"),
     ("Select the mask (Alt+click: show it in the viewport)", "Sélectionner le masque (Alt+clic : l'afficher dans la fenêtre d'affichage)"),
     ("Select...", "Sélectionner..."),
+    ("Send layers to PhotoCraft...", "Envoyer les calques vers PhotoCraft..."),
+    ("Sent {n} documents to PhotoCraft; its saves show here", "{n} documents envoyés vers PhotoCraft ; ses enregistrements s'affichent ici"),
     ("Settings", "Paramètres"),
     ("Settings...", "Paramètres..."),
     ("Shader Settings", "Paramètres du shader"),
@@ -863,6 +865,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("UV tiles (UDIM)", "Tuiles UV (UDIM)"),
     ("Undo", "Annuler"),
     ("Uniform value", "Valeur uniforme"),
+    ("Updated from PhotoCraft", "Mis à jour depuis PhotoCraft"),
     ("Use an equirectangular .hdr or .exr image as the environment", "Utiliser une image équirectangulaire .hdr ou .exr comme environnement"),
     (
         "Use the control channel or `texturecraft-cli render` for screenshots",

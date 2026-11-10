@@ -331,6 +331,17 @@ impl TextureCraftApp {
         }
     }
 
+    /// Show what PhotoCraft saved into the files sent to it (File › Send layers to PhotoCraft).
+    fn poll_photocraft(&mut self, ctx: &egui::Context) {
+        if self.session.photocraft.links.is_empty() {
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(texturecraft_engine::photocraft_cmds::POLL_MS as u64));
+        if self.session.poll_photocraft(now_ms()) {
+            self.toast(i18n::tr("Updated from PhotoCraft"), false);
+        }
+    }
+
     fn poll_link_cooks(&mut self, ctx: &egui::Context) {
         if self.link_cooks.is_empty() {
             return;
@@ -657,6 +668,7 @@ impl eframe::App for TextureCraftApp {
         self.poll_bake(ctx);
         self.poll_resize(ctx);
         self.poll_link_cooks(ctx);
+        self.poll_photocraft(ctx);
         // The library shelf rescans when the window comes back (MaterialCraft may have sent a material).
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         if focused && !self.focused {

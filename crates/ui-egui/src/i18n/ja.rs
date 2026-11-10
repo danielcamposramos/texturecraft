@@ -720,6 +720,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Select source", "ソースを選択"),
     ("Select the mask (Alt+click: show it in the viewport)", "マスクを選択 (Alt+クリック: ビューポートに表示)"),
     ("Select...", "選択..."),
+    ("Send layers to PhotoCraft...", "レイヤーを PhotoCraft に送る..."),
+    ("Sent {n} documents to PhotoCraft; its saves show here", "{n} 個のドキュメントを PhotoCraft に送りました。そこで保存すると、ここに反映されます"),
     ("Settings", "設定"),
     ("Settings...", "設定..."),
     ("Shader Settings", "シェーダー設定"),
@@ -836,6 +838,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("UV tiles (UDIM)", "UVタイル (UDIM)"),
     ("Undo", "元に戻す"),
     ("Uniform value", "均一値"),
+    ("Updated from PhotoCraft", "PhotoCraft から更新しました"),
     ("Use an equirectangular .hdr or .exr image as the environment", "正距円筒図法の .hdr または .exr 画像を環境として使用"),
     (
         "Use the control channel or `texturecraft-cli render` for screenshots",

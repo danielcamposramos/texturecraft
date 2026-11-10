@@ -193,5 +193,6 @@ pub fn session(s: &Session) -> Value {
         "history": { "undo": s.undo_label(), "redo": s.redo_label(), "depth": s.history_labels().len() },
         "memoryBytes": s.memory().total(),
         "pendingTiles": s.pending_tiles(),
+        "photocraftLinks": crate::photocraft_cmds::links_json(s),
     })
 }

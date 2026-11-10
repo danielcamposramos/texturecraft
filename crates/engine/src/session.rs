@@ -371,6 +371,8 @@ pub struct Session {
     pub export_presets: crate::preset_cmds::UserPresets,
     /// The user's project templates (kept when another project opens).
     pub templates: crate::template_cmds::UserTemplates,
+    /// Files sent to PhotoCraft whose saves show live (not saved with the project).
+    pub photocraft: crate::photocraft_cmds::Links,
 }
 
 impl Session {
@@ -421,6 +423,7 @@ impl Session {
             polygon_fill_drag: None,
             export_presets: Default::default(),
             templates: Default::default(),
+            photocraft: Default::default(),
         })
     }
 

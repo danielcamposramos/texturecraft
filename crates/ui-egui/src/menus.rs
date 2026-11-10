@@ -50,6 +50,7 @@ pub const CATALOG: &[Item] = &[
     it("File", "Import material...", "material.load", None),
     it("File", "Export Textures...", "ui.export", Some("Ctrl+Shift+E")),
     it("File", "Export Mesh...", "file.exportMesh", None),
+    it("File", "Send layers to PhotoCraft...", "file.sendToPhotoCraft", None),
     sep("File"),
     it("File", "Quit", "ui.quit", Some("Ctrl+Q")),
     it("Edit", "Undo", "edit.undo", Some("Ctrl+Z")),

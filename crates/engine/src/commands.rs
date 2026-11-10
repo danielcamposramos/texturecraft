@@ -78,6 +78,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(crate::resource_cmds::specs());
         v.extend(crate::material_lib::specs());
         v.extend(crate::link_cmds::specs());
+        v.extend(crate::photocraft_cmds::specs());
         v.extend(crate::smart_masks::specs());
         v.extend(crate::filter_lib::specs());
         v.extend(crate::decal_cmds::specs());

@@ -907,6 +907,20 @@ pub fn file_action(app: &mut TextureCraftApp, _ctx: &egui::Context, id: &str) ->
             });
             true
         }
+        "file.sendToPhotoCraft" => {
+            app.ask_file(FileDialog::folder(), Bound::Project, |app, paths| {
+                if let Some(d) = paths.first()
+                    && let Some(r) = app.run("file.sendToPhotoCraft", json!({"dir": d.display().to_string(), "ts": "all"}))
+                {
+                    for w in r.get("warnings").and_then(|w| w.as_array()).into_iter().flatten().filter_map(|w| w.as_str()) {
+                        app.session.log.push(format!("PhotoCraft: {w}"));
+                    }
+                    let n = r.get("files").and_then(|f| f.as_array()).map_or(0, Vec::len);
+                    app.toast(trf("Sent {n} documents to PhotoCraft; its saves show here", &[("n", &n)]), false);
+                }
+            });
+            true
+        }
         "file.reimportMesh" => {
             // The file the mesh came from is read again from disk; ask only when it's gone.
             if let Some(path) = app.session.remembered_mesh_path().map(str::to_string) {

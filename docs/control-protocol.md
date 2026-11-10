@@ -336,6 +336,30 @@ case and underscores ignored). Usages map to channels of the same id (`baseColor
 OpenGL convention, `roughness`, `metallic`, `height`, `ambientOcclusion`, `emissive`, `opacity`,
 `specular`); missing channels join the texture set.
 
+## PhotoCraft hand-off
+
+`file.sendToPhotoCraft` (File › Send layers to PhotoCraft...) writes the texture set's stack as layered
+OpenRaster documents (`formats::ora`), one per texture set and channel, named
+`<mesh>_<set>_<channel>.ora`, and opens them in PhotoCraft (`$PHOTOCRAFT`, else `photocraft` next to the
+TextureCraft executable, else on `PATH`). Each layer is rendered alone into a layer of the same name:
+its fill sources, generators, filters and content effects, times its mask, so the mask becomes the
+layer's transparency. Folders become groups (pass-through folders `isolation="auto"`), with the
+channel's visibility, opacity and blend mode (`svg:*` names; modes OpenRaster lacks are sent as
+Normal with a warning). Colour channels are sRGB, data channels as stored (height `0.5 + 0.5·h`,
+normals OpenGL), 16-bit with straight alpha; `mergedimage.png` is the set's composite.
+
+Each sent file is a link. When PhotoCraft saves it, its `mergedimage.png` becomes the image source of a
+`PhotoCraft: <channel>` fill at the top of the set (one undo step per save; the layers below are
+untouched). The desktop app looks at the files' modification times about twice a second and never
+during a stroke. Links last for the session and are not saved with the project.
+
+| Command | Params |
+|---|---|
+| `file.sendToPhotoCraft` | `{dir, ts?: index\|"all" (default: the active set), channels?: [ids], open?: true}` → `{files, warnings}` |
+| `photocraft.links` | `{}` → `[{path, ts, channel, layer?}]` |
+| `photocraft.sync` | `{}` → `{updated}`: read the linked files saved since the last look now |
+| `photocraft.unlink` | `{path?}`: stop watching one file, or all |
+
 ## CLI
 
 ```sh

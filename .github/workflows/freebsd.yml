@@ -33,4 +33,8 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/freebsd.yml@main
     with:
       craft-fonts-ref: aced4137c022f1f587624d48e81ec77e1914a9cc
+      # The VM's software Vulkan driver crashes (SIGSEGV) when several tests set up a device at
+      # once, so the crates whose tests open a GPU device run their tests one at a time, as in
+      # photocraft. The other crates keep running in parallel.
+      custom-test-command: "CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked --exclude texturecraft-render --exclude texturecraft-automation --exclude texturecraft-ui-egui --exclude texturecraft && CARGO_PROFILE_DEV_DEBUG=0 cargo test --locked -p texturecraft-render -p texturecraft-automation -p texturecraft-ui-egui -p texturecraft -- --test-threads=1"
       run-package-check: true

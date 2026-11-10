@@ -378,13 +378,10 @@ fn size_weights(command: &str, value: &Value) -> Result<[f32; CurvatureDetail::S
 /// An anchor point on the layer content (the default, as before anchors went on masks) or, with
 /// `target: "mask"`, in its mask.
 fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
-    let mut params = p.clone();
-    if p.get("target").is_none()
-        && let Some(o) = params.as_object_mut()
-    {
-        o.insert("target".into(), json!("content"));
-    }
-    push_effect(s, &params, EffectKind::Anchor, BlendMode::Normal)
+    // Params may be null or an object without a target: both default to the content.
+    let mut params = p.as_object().cloned().unwrap_or_default();
+    params.entry("target").or_insert_with(|| json!("content"));
+    push_effect(s, &Value::Object(params), EffectKind::Anchor, BlendMode::Normal)
 }
 
 /// A generator's micro detail from `microAnchor` / `microAmount` for a generator on layer

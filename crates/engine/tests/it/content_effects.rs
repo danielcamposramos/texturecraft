@@ -106,9 +106,11 @@ fn anchor_points_in_masks_record_the_mask_for_layers_above() {
     let layer = s.doc.project.layer(LayerId(low)).unwrap();
     assert!(layer.mask.as_ref().unwrap().effects.iter().any(|e| e.id.0 == anchor), "in the mask");
     assert!(layer.content_effects.is_empty(), "not on the content");
-    // Without a target it still goes on the content, as before.
+    // Without a target (or with no params at all) it still goes on the content, as before.
     let content = id(execute(&mut s, "effect.add.anchor", &json!({"layer": low})).unwrap(), "effect");
     assert!(s.doc.project.layer(LayerId(low)).unwrap().content_effects.iter().any(|e| e.id.0 == content));
+    let bare = id(execute(&mut s, "effect.add.anchor", &Value::Null).unwrap(), "effect");
+    assert!(s.doc.project.layer(LayerId(low)).unwrap().content_effects.iter().any(|e| e.id.0 == bare));
 
     // Folders take anchors in their masks only.
     let folder = id(execute(&mut s, "layer.add.group", &Value::Null).unwrap(), "layer");

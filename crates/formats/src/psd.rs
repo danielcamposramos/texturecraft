@@ -54,6 +54,8 @@ pub struct Mask16 {
 /// One layer or group of a document to write, children top-first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
+    /// The layer's id (`lyid`); 0 picks one above every id given. Ids should be unique.
+    pub id: u32,
     pub name: String,
     pub visible: bool,
     /// 0..1.
@@ -334,8 +336,12 @@ struct Records {
 impl Records {
     fn layer(&mut self, l: &Layer, section: Option<u32>, ch: Channels, comps: usize) -> Result<()> {
         self.count += 1;
-        self.next_id += 1;
-        let id = self.next_id;
+        let id = if l.id != 0 && section != Some(3) {
+            l.id
+        } else {
+            self.next_id = self.next_id.saturating_add(1);
+            self.next_id
+        };
         let r = &mut self.records;
         let (t, left, b, right) = ch.rect;
         r.i32(t);
@@ -418,6 +424,7 @@ impl Records {
                 }
                 Kind::Group(children) => {
                     let end = Layer {
+                        id: 0,
                         name: "</Layer group>".into(),
                         visible: true,
                         opacity: 1.0,
@@ -502,7 +509,7 @@ pub fn write_psd(doc: &Document) -> Result<Vec<u8>> {
     out.u32(len32(resources.len())?);
     out.bytes(&resources);
 
-    let mut recs = Records { records: Vec::new(), channels: Vec::new(), count: 0, next_id: 0 };
+    let mut recs = Records { records: Vec::new(), channels: Vec::new(), count: 0, next_id: max_id(&doc.layers, 0) };
     recs.nodes(&doc.layers, canvas, doc.comps.len(), 1)?;
     if recs.count > MAX_RECORDS {
         return Err(invalid(format!("{} layers and groups; a document holds at most {MAX_RECORDS}", recs.count)));
@@ -532,12 +539,26 @@ pub fn write_psd(doc: &Document) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The largest id given in `layers`.
+fn max_id(layers: &[Layer], depth: usize) -> u32 {
+    layers
+        .iter()
+        .map(|l| match &l.kind {
+            Kind::Group(children) if depth < MAX_DEPTH => l.id.max(max_id(children, depth + 1)),
+            _ => l.id,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 // ------------------------------------------------------------------------------------------
 // Reading
 
 /// A layer or group read back, children top-first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadLayer {
+    /// The layer's id (`lyid`), when the file has one; editors keep it across saves.
+    pub id: Option<u32>,
     pub name: String,
     pub visible: bool,
     pub opacity: f32,
@@ -632,6 +653,7 @@ struct Record {
     visible: bool,
     mask: Option<(Rect, u8, bool)>,
     section: Option<u32>,
+    id: Option<u32>,
 }
 
 fn rect_size((t, l, b, r): (i32, i32, i32, i32)) -> Result<(usize, usize)> {
@@ -687,6 +709,7 @@ fn read_record(r: &mut Reader) -> Result<Record> {
     let pad = (4 - (name_len + 1) % 4) % 4;
     e.skip(pad.min(e.b.len().saturating_sub(e.p)))?;
     let mut section = None;
+    let mut id = None;
     while e.b.len().saturating_sub(e.p) >= 12 {
         let sig = e.take(4)?;
         if sig != b"8BIM" && sig != b"8B64" {
@@ -704,6 +727,7 @@ fn read_record(r: &mut Reader) -> Result<Record> {
                 let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).take_while(|u| *u != 0).collect();
                 name = String::from_utf16_lossy(&units);
             }
+            b"lyid" if data.len() >= 4 => id = Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]])),
             b"lsct" | b"lsdk" => {
                 let mut d = Reader { b: data, p: 0 };
                 section = Some(d.u32()?);
@@ -714,7 +738,7 @@ fn read_record(r: &mut Reader) -> Result<Record> {
             _ => {}
         }
     }
-    Ok(Record { name, rect, channels, blend, opacity, visible: flags & 2 == 0, mask, section })
+    Ok(Record { name, rect, channels, blend, opacity, visible: flags & 2 == 0, mask, section, id })
 }
 
 /// Decode one channel of `w`×`h` samples at `depth` bits into 16-bit samples.
@@ -949,6 +973,7 @@ fn nest(it: &mut std::iter::Peekable<impl Iterator<Item = (Record, Option<ReadKi
     let mut out = Vec::new();
     while let Some((rec, pixels, mask)) = it.next() {
         let base = |kind| ReadLayer {
+            id: rec.id,
             name: rec.name.clone(),
             visible: rec.visible,
             opacity: f32::from(rec.opacity) / 255.0,
@@ -988,7 +1013,7 @@ mod tests {
     }
 
     fn layer(name: &str, kind: Kind) -> Layer {
-        Layer { name: name.into(), visible: true, opacity: 1.0, blend: *b"norm", mask: None, comps: Vec::new(), kind }
+        Layer { id: 0, name: name.into(), visible: true, opacity: 1.0, blend: *b"norm", mask: None, comps: Vec::new(), kind }
     }
 
     #[test]
@@ -1001,7 +1026,7 @@ mod tests {
         let base =
             Layer { opacity: 0.5, blend: *b"mul ", comps: vec![true, false], ..layer("Base color", px(solid(w, h, (1, 1, 4, 3), [100, 200, 300, 65535]))) };
         let rough = Layer { visible: false, comps: vec![false, true], ..layer("Roughness", px(solid(w, h, (0, 0, 16, 8), [5, 5, 5, 65535]))) };
-        let group = Layer { blend: *b"pass", mask: Some(encode_mask(&mask).unwrap()), ..layer("Dirt ✓", Kind::Group(vec![base, rough])) };
+        let group = Layer { id: 42, blend: *b"pass", mask: Some(encode_mask(&mask).unwrap()), ..layer("Dirt ✓", Kind::Group(vec![base, rough])) };
         let doc = Document {
             layers: vec![group, layer("Layer 1", px(Rgba16::transparent(w, h)))],
             merged: solid(w, h, (0, 0, 16, 8), [1, 2, 3, 65535]),
@@ -1013,6 +1038,7 @@ mod tests {
         assert_eq!(back.layers.len(), 2);
         let g = &back.layers[0];
         assert_eq!(g.name, "Dirt ✓");
+        assert_eq!(g.id, Some(42), "a given id is kept");
         assert_eq!(&g.blend, b"pass");
         let m = g.mask.as_ref().unwrap();
         for y in 0..h as i32 {
@@ -1025,6 +1051,9 @@ mod tests {
         assert_eq!(&children[0].blend, b"mul ");
         assert!((children[0].opacity - 0.5).abs() < 0.01);
         assert!(!children[1].visible);
+        // Layers without an id get ones above every id given.
+        let ids = [children[0].id, children[1].id, back.layers[1].id];
+        assert!(ids.iter().all(|i| i.is_some_and(|i| i > 42)) && ids[0] != ids[1] && ids[1] != ids[2], "{ids:?}");
         let ReadKind::Pixels { x, y, image } = &children[0].kind else { panic!() };
         assert_eq!((*x, *y, image.width, image.height), (1, 1, 4, 3), "cropped to the layer's pixels");
         assert_eq!(&image.data[..4], &[100, 200, 300, 65535]);

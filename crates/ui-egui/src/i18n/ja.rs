@@ -3,6 +3,7 @@
 pub const TABLE: &[(&str, &str)] = &[
     ("Baking {map} ({n}/{total})", "{map} をベイク中 ({n}/{total})"),
     ("Baking {map} ({n}/{total}), texture set {set} of {sets}", "{map} をベイク中 ({n}/{total})、テクスチャセット {set}/{sets}"),
+    ("Choose channel", "チャンネルを選択"),
     ("Follow Newest Map", "最新のマップを追う"),
     (
         "Painting is paused while a bake is shown. Cancel the bake or wait for it to finish.",
@@ -809,6 +810,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("The resize worker stopped", "サイズ変更の処理が停止しました"),
     ("Thickness", "厚み"),
     ("Thin areas", "薄い領域"),
+    (
+        "This layer has no channel on: choose the channel its painting is for",
+        "このレイヤーにはオンのチャンネルがありません。ペイントの対象となるチャンネルを選んでください",
+    ),
     ("Threshold", "しきい値"),
     ("Tile", "タイル"),
     ("Tiles", "タイル"),

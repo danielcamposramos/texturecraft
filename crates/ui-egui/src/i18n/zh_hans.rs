@@ -3,12 +3,14 @@
 pub const TABLE: &[(&str, &str)] = &[
     ("Baking {map} ({n}/{total})", "正在烘焙{map} ({n}/{total})"),
     ("Baking {map} ({n}/{total}), texture set {set} of {sets}", "正在烘焙{map} ({n}/{total})，纹理集 {set}/{sets}"),
+    ("Choose channel", "选择通道"),
     ("Follow Newest Map", "跟随最新贴图"),
     ("Painting is paused while a bake is shown. Cancel the bake or wait for it to finish.", "显示烘焙时已暂停绘制。请取消烘焙，或等待其完成。"),
     (
         "What the 3D view shows while the bake runs: the newest finished map, one finished map, or the material. Maps not baked yet show a neutral value.",
         "烘焙过程中 3D 视图显示的内容：最新完成的贴图、任意已完成的贴图，或材质。尚未烘焙的贴图显示中性值。",
     ),
+    ("This layer has no channel on: choose the channel its painting is for", "此图层没有开启任何通道：请选择其绘画所属的通道"),
     ("\"{layer}\" has no paint yet: the filter changes what you paint on it.", "“{layer}”尚未绘制：滤镜会改变你在其上绘制的内容。"),
     ("0 turns autosave off. Copies go to {folder}", "设为 0 可关闭自动保存。副本保存到 {folder}"),
     ("2D view only", "仅 2D 视图"),

@@ -3,6 +3,7 @@
 pub const TABLE: &[(&str, &str)] = &[
     ("Baking {map} ({n}/{total})", "{map} 베이크 중 ({n}/{total})"),
     ("Baking {map} ({n}/{total}), texture set {set} of {sets}", "{map} 베이크 중 ({n}/{total}), 텍스처 세트 {set}/{sets}"),
+    ("Choose channel", "채널 선택"),
     ("Follow Newest Map", "최신 맵 따라가기"),
     (
         "Painting is paused while a bake is shown. Cancel the bake or wait for it to finish.",
@@ -800,6 +801,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("The resize worker stopped", "크기 조정 작업이 중지되었습니다"),
     ("Thickness", "두께"),
     ("Thin areas", "얇은 영역"),
+    ("This layer has no channel on: choose the channel its painting is for", "이 레이어에는 켜진 채널이 없습니다. 페인팅이 적용될 채널을 선택하세요"),
     ("Threshold", "한계값"),
     ("Tile", "타일"),
     ("Tiles", "타일"),

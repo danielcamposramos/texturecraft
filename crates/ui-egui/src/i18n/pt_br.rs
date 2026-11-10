@@ -3,6 +3,7 @@
 pub const TABLE: &[(&str, &str)] = &[
     ("Baking {map} ({n}/{total})", "Fazendo o bake de {map} ({n}/{total})"),
     ("Baking {map} ({n}/{total}), texture set {set} of {sets}", "Fazendo o bake de {map} ({n}/{total}), conjunto de texturas {set} de {sets}"),
+    ("Choose channel", "Escolher canal"),
     ("Follow Newest Map", "Seguir o mapa mais recente"),
     (
         "Painting is paused while a bake is shown. Cancel the bake or wait for it to finish.",
@@ -12,6 +13,7 @@ pub const TABLE: &[(&str, &str)] = &[
         "What the 3D view shows while the bake runs: the newest finished map, one finished map, or the material. Maps not baked yet show a neutral value.",
         "O que a vista 3D mostra durante o bake: o último mapa concluído, um mapa concluído à escolha ou o material. Mapas ainda não gerados mostram um valor neutro.",
     ),
+    ("This layer has no channel on: choose the channel its painting is for", "Esta camada não tem nenhum canal ligado: escolha o canal da pintura dela"),
     ("\"{layer}\" has no paint yet: the filter changes what you paint on it.", "\"{layer}\" ainda não tem pintura: o filtro altera o que você pintar nela."),
     ("0 turns autosave off. Copies go to {folder}", "0 desativa o salvamento automático. As cópias vão para {folder}"),
     ("2D view only", "Apenas vista 2D"),

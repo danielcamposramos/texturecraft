@@ -7,17 +7,106 @@
 //! that channel's layers, so the whole material is one document and a mask edited once
 //! shapes every channel.
 //!
-//! When PhotoCraft saves the file, [`composite`] rebuilds each channel from the saved layers:
-//! a pixel layer counts for the channel it is named after, through every group mask, opacity
-//! and visibility above it, blended with TextureCraft's own blend math.
+//! Every node gets a layer id (`lyid`, which PhotoCraft keeps across saves) from
+//! [`FIRST_ID`] up, and the send remembers what each id stands for ([`Role`]) and how it looked
+//! ([`Sent`]). When PhotoCraft saves the file, [`crate::photocraft_sync`] compares the saved
+//! layers with that record and mirrors the changes into the stack.
 
-use texturecraft_core::{BlendMode, Channel, ChannelKind, LayerId, LayerKind, blend1, blend3, mix3};
-use texturecraft_formats::ora::Rgba16;
-use texturecraft_formats::psd::{self, EncodedMask, Kind, Mask16, ReadDocument, ReadKind, ReadLayer};
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hasher};
+
+use texturecraft_core::{BlendMode, Channel, ChannelKind, LayerId, LayerKind};
+use texturecraft_formats::psd::{self, EncodedMask, Kind, Mask16, ReadKind, ReadLayer, ReadMask};
 use texturecraft_texel::{TILE, TILE_AREA, from_u16, srgb_to_linear};
 
-use crate::photocraft_cmds::{encode_value, flat_image, merged_image};
+use crate::photocraft_cmds::{flat_image, merged_image};
 use crate::{EngineError, Result, Session};
+
+/// The first layer id a send gives; PhotoCraft numbers the layers it adds from 1.
+pub const FIRST_ID: u32 = 0x4000_0000;
+
+/// What a node of a sent document stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// A folder, as a group.
+    Folder(LayerId),
+    /// A layer, as a pass-through group holding its channels.
+    Layer(LayerId),
+    /// One channel of a layer, as a pixel layer inside the layer's group.
+    Channel(LayerId, Channel),
+    /// A layer brought in from PhotoCraft, as the one pixel layer it came from.
+    Pixels(LayerId),
+}
+
+impl Role {
+    pub fn layer(self) -> LayerId {
+        match self {
+            Role::Folder(id) | Role::Layer(id) | Role::Channel(id, _) | Role::Pixels(id) => id,
+        }
+    }
+}
+
+/// How a node looked when it was sent or last read back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sent {
+    pub role: Role,
+    pub name: String,
+    pub visible: bool,
+    /// 0..255, as stored.
+    pub opacity: u8,
+    pub blend: [u8; 4],
+    /// Fingerprints of the node's mask and pixels (0: none), independent of compression and
+    /// cropping.
+    pub mask: u64,
+    pub pixels: u64,
+}
+
+/// A sent document's nodes by layer id.
+pub type SentMap = BTreeMap<u32, Sent>;
+
+/// The record of `node` as `role`.
+pub(crate) fn record(node: &ReadLayer, role: Role) -> Sent {
+    Sent {
+        role,
+        name: node.name.clone(),
+        visible: node.visible,
+        opacity: (node.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+        blend: node.blend,
+        mask: mask_print(node.mask.as_ref()),
+        pixels: pixel_print(&node.kind),
+    }
+}
+
+fn mask_print(m: Option<&ReadMask>) -> u64 {
+    let Some(m) = m else { return 0 };
+    let mut h = DefaultHasher::new();
+    h.write_u16(m.default);
+    for (i, v) in m.data.iter().enumerate() {
+        if *v != m.default {
+            let (x, y) = (i64::from(m.x) + (i % m.width.max(1) as usize) as i64, i64::from(m.y) + (i / m.width.max(1) as usize) as i64);
+            h.write_i64(x);
+            h.write_i64(y);
+            h.write_u16(*v);
+        }
+    }
+    h.finish() | 1
+}
+
+fn pixel_print(kind: &ReadKind) -> u64 {
+    let ReadKind::Pixels { x, y, image } = kind else { return 0 };
+    let mut h = DefaultHasher::new();
+    let w = image.width.max(1) as usize;
+    for (i, px) in image.data.as_chunks::<4>().0.iter().enumerate() {
+        if px[3] > 0 {
+            h.write_i64(i64::from(*x) + (i % w) as i64);
+            h.write_i64(i64::from(*y) + (i / w) as i64);
+            for v in px {
+                h.write_u16(*v);
+            }
+        }
+    }
+    h.finish() | 1
+}
 
 /// The PSD blend mode key for `mode`, with a warning when it is only close or missing.
 pub(crate) fn psd_key(mode: BlendMode) -> ([u8; 4], Option<&'static str>) {
@@ -51,7 +140,7 @@ pub(crate) fn psd_key(mode: BlendMode) -> ([u8; 4], Option<&'static str>) {
 }
 
 /// The blend mode a PSD key stands for (unknown keys blend as Normal).
-fn mode_of(key: &[u8; 4]) -> BlendMode {
+pub(crate) fn mode_of(key: &[u8; 4]) -> BlendMode {
     use BlendMode as B;
     match key {
         b"mul " => B::Multiply,
@@ -87,9 +176,17 @@ struct Tree<'s> {
     channels: Vec<Channel>,
     covered: Vec<(u32, u32)>,
     warnings: Vec<String>,
+    roles: BTreeMap<u32, Role>,
 }
 
 impl Tree<'_> {
+    /// The next node id, standing for `role`.
+    fn id(&mut self, role: Role) -> u32 {
+        let id = FIRST_ID.saturating_add(self.roles.len() as u32);
+        self.roles.insert(id, role);
+        id
+    }
+
     fn warn(&mut self, layer: &str, msg: &str) {
         let line = format!("\"{layer}\": {msg}");
         if !self.warnings.contains(&line) {
@@ -125,8 +222,10 @@ impl Tree<'_> {
                         self.warn(&layer.name, "the folder blends its channels differently; it is sent as a pass-through group at 100%");
                         (*b"pass", 1.0)
                     };
+                    let id_ = self.id(Role::Folder(id));
                     let children = self.nodes(children, depth + 1)?;
                     psd::Layer {
+                        id: id_,
                         name: layer.name.clone(),
                         visible: layer.visible,
                         opacity,
@@ -149,6 +248,7 @@ impl Tree<'_> {
                         let comps: Vec<bool> = self.channels.iter().map(|x| x == c).collect();
                         let first_comp = self.channels.first() == Some(c);
                         children.push(psd::Layer {
+                            id: self.id(Role::Channel(id, *c)),
                             name: c.label().to_string(),
                             visible: first_comp,
                             opacity: b.opacity,
@@ -159,6 +259,7 @@ impl Tree<'_> {
                         });
                     }
                     psd::Layer {
+                        id: self.id(Role::Layer(id)),
                         name: layer.name.clone(),
                         visible: layer.visible,
                         opacity: 1.0,
@@ -220,8 +321,8 @@ impl Session {
     }
 
     /// Texture set `ts` as one layered PSD of `channels` (see the module docs), plus what it
-    /// couldn't keep.
-    pub fn photocraft_psd(&mut self, ts: usize, channels: &[Channel]) -> Result<(Vec<u8>, Vec<String>)> {
+    /// couldn't keep and the record of its nodes.
+    pub fn photocraft_psd(&mut self, ts: usize, channels: &[Channel]) -> Result<(Vec<u8>, Vec<String>, SentMap)> {
         self.update();
         let set = self.doc.project.texture_set(ts).map_err(|e| EngineError::Other(e.to_string()))?;
         let channels: Vec<Channel> = channels.iter().copied().filter(|c| set.channel_list().contains(c)).collect();
@@ -239,108 +340,45 @@ impl Session {
             .filter(|(_, c)| **c)
             .map(|(i, _)| ((i % size.0 as usize) as u32, (i / size.0 as usize) as u32))
             .collect();
-        let mut tree = Tree { s: self, ts, size, channels: channels.clone(), covered, warnings: Vec::new() };
+        let mut tree = Tree { s: self, ts, size, channels: channels.clone(), covered, warnings: Vec::new(), roles: BTreeMap::new() };
         let layers = tree.nodes(&stack, 1)?;
+        let roles = tree.roles;
         let mut warnings = tree.warnings;
         if channels.iter().any(|c| c.kind() == ChannelKind::NormalMap) {
             warnings.push("normal channels: PhotoCraft blends normal layers as colours, not as normals".into());
         }
         let doc = psd::Document { layers, merged: merged_image(self, ts, first)?, comps: channels.iter().map(|c| c.label().to_string()).collect() };
         let bytes = psd::write_psd(&doc).map_err(|e| EngineError::Other(e.to_string()))?;
-        Ok((bytes, warnings))
+        // Recorded from the file itself, so a save that changes nothing compares equal.
+        let back = psd::read_psd(&bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+        let mut sent = SentMap::new();
+        record_all(&back.layers, &roles, &mut sent, 0);
+        Ok((bytes, warnings, sent))
+    }
+}
+
+fn record_all(nodes: &[ReadLayer], roles: &BTreeMap<u32, Role>, out: &mut SentMap, depth: usize) {
+    if depth > psd::MAX_DEPTH {
+        return;
+    }
+    for node in nodes {
+        if let Some((id, role)) = node.id.and_then(|id| roles.get(&id).map(|r| (id, *r))) {
+            out.insert(id, record(node, role));
+        }
+        if let ReadKind::Group(children) = &node.kind {
+            record_all(children, roles, out, depth + 1);
+        }
     }
 }
 
 /// A channel value from a saved pixel (straight, 0..65535).
-fn decode(c: Channel, px: &[u16]) -> [f32; 3] {
+pub(crate) fn decode(c: Channel, px: &[u16]) -> [f32; 3] {
     let v = |k: usize| px.get(k).map_or(0.0, |v| from_u16(*v));
     match c.kind() {
         ChannelKind::Color => [0, 1, 2].map(|k| srgb_to_linear(v(k))),
         ChannelKind::NormalMap => [v(0), v(1), v(2)],
         ChannelKind::Scalar => [v(0); 3],
         ChannelKind::Signed => [v(0) * 2.0 - 1.0; 3],
-    }
-}
-
-/// Channel `c` of a saved document, `w`×`h`: the channel's default value with every layer named
-/// after `c` blended over it (see the module docs). Encoded as the hand-off writes channels;
-/// opaque where `coverage` is set.
-pub(crate) fn composite(doc: &ReadDocument, c: Channel, coverage: &[bool], notes: &mut Vec<String>) -> Rgba16 {
-    let (w, h) = (doc.width as usize, doc.height as usize);
-    let mut acc = vec![c.default_value(); w * h];
-    walk(&doc.layers, c, &mut acc, (w, h), None, 0, notes);
-    let mut img = Rgba16::transparent(doc.width, doc.height);
-    for (i, v) in acc.iter().enumerate() {
-        if coverage.get(i).copied().unwrap_or(false)
-            && let Some(dst) = img.data.get_mut(i * 4..i * 4 + 4)
-        {
-            dst.copy_from_slice(&encode_value(c, *v));
-        }
-    }
-    img
-}
-
-fn is_channel_name(name: &str) -> bool {
-    Channel::ALL.iter().any(|c| c.label() == name.trim())
-}
-
-/// Blend `nodes` (top-first) into `acc`, each weighted by `weight` (the masks, opacities and
-/// visibility of the groups above; None: 1).
-fn walk(nodes: &[ReadLayer], c: Channel, acc: &mut [[f32; 3]], (w, h): (usize, usize), weight: Option<&[f32]>, depth: usize, notes: &mut Vec<String>) {
-    if depth > psd::MAX_DEPTH {
-        return;
-    }
-    for node in nodes.iter().rev() {
-        match &node.kind {
-            ReadKind::Group(children) => {
-                if !node.visible || node.opacity <= 0.0 {
-                    continue;
-                }
-                let mut wgt: Vec<f32> = weight.map_or_else(|| vec![1.0; w * h], <[f32]>::to_vec);
-                for (i, v) in wgt.iter_mut().enumerate() {
-                    let m = node.mask.as_ref().map_or(1.0, |m| from_u16(m.at((i % w) as i32, (i / w) as i32)));
-                    *v *= m * node.opacity;
-                }
-                walk(children, c, acc, (w, h), Some(&wgt), depth + 1, notes);
-            }
-            ReadKind::Pixels { x, y, image } => {
-                // Channel layers are shown one comp at a time, so their own visibility is ignored.
-                if node.name.trim() != c.label() {
-                    if node.visible && !is_channel_name(&node.name) {
-                        let note = format!("\"{}\" is not named after a channel (such as \"{}\"), so it isn't brought back", node.name, c.label());
-                        if !notes.contains(&note) {
-                            notes.push(note);
-                        }
-                    }
-                    continue;
-                }
-                let mode = mode_of(&node.blend);
-                let (iw, ih) = (image.width as usize, image.height as usize);
-                for ly in 0..ih {
-                    let cy = i64::from(*y) + ly as i64;
-                    if cy < 0 || cy >= h as i64 {
-                        continue;
-                    }
-                    for lx in 0..iw {
-                        let cx = i64::from(*x) + lx as i64;
-                        if cx < 0 || cx >= w as i64 {
-                            continue;
-                        }
-                        let i = cy as usize * w + cx as usize;
-                        let Some(px) = image.data.get((ly * iw + lx) * 4..(ly * iw + lx) * 4 + 4) else { continue };
-                        let mask = node.mask.as_ref().map_or(1.0, |m| from_u16(m.at(cx as i32, cy as i32)));
-                        let a = from_u16(px[3]) * node.opacity * mask * weight.and_then(|wg| wg.get(i)).copied().unwrap_or(1.0);
-                        if a <= 0.0 {
-                            continue;
-                        }
-                        let Some(dst) = acc.get_mut(i) else { continue };
-                        let v = decode(c, px);
-                        let blended = if c.components() == 3 { blend3(mode, *dst, v) } else { [blend1(mode, dst[0], v[0]); 3] };
-                        *dst = mix3(*dst, blended, a.min(1.0));
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -361,7 +399,7 @@ mod tests {
             .filter(|(_, c)| **c)
             .map(|(i, _)| ((i % size.0 as usize) as u32, (i / size.0 as usize) as u32))
             .collect();
-        Tree { s, ts: 0, size, channels: vec![Channel::BaseColor], covered, warnings: Vec::new() }
+        Tree { s, ts: 0, size, channels: vec![Channel::BaseColor], covered, warnings: Vec::new(), roles: BTreeMap::new() }
     }
 
     #[test]

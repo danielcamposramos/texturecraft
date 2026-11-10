@@ -83,8 +83,20 @@ pub struct Link {
     pub channels: Vec<Channel>,
     /// The file's modification time when it was last read or written.
     pub modified: Option<std::time::SystemTime>,
-    /// The `PhotoCraft: <channel>` fills showing what the file holds, once there are some.
+    /// OpenRaster: the `PhotoCraft: <channel>` fill showing the file's merged image, once there
+    /// is one.
     pub layers: BTreeMap<Channel, LayerId>,
+    /// PSD: what each layer of the file stands for and how it looked when last read or written.
+    pub sent: crate::photocraft_psd::SentMap,
+}
+
+/// What reading a linked file changed.
+#[cfg(not(target_arch = "wasm32"))]
+enum Shown {
+    /// OpenRaster: the `PhotoCraft: <channel>` fills.
+    Fills(BTreeMap<Channel, LayerId>),
+    /// PSD: the stack mirrors the file; its new record.
+    Stack(crate::photocraft_psd::SentMap),
 }
 
 /// The session's PhotoCraft links (not saved with the project).
@@ -107,6 +119,7 @@ pub(crate) fn links_json(s: &Session) -> Value {
                 "format": l.format.id(),
                 "channels": l.channels.iter().map(|c| c.id()).collect::<Vec<_>>(),
                 "layers": l.layers.iter().map(|(c, id)| (c.id().to_string(), json!(id.0))).collect::<serde_json::Map<_, _>>(),
+                "nodes": l.sent.len(),
             }))
             .collect::<Vec<_>>()
     )
@@ -360,14 +373,14 @@ fn send(s: &mut Session, p: &Value) -> Result<Value> {
             warnings.push(format!("texture set \"{set_name}\" sends as {} like an earlier set, so it was skipped; rename one of them", path.display()));
             continue;
         }
-        let (bytes, w) = match (format, channels.first()) {
+        let (bytes, w, sent) = match (format, channels.first()) {
             (Format::Ora, Some(&c)) => {
                 let (bytes, w) = s.photocraft_document(ts, c)?;
-                (bytes, w.into_iter().map(|w| format!("{set_name} {}: {w}", c.label())).collect::<Vec<_>>())
+                (bytes, w.into_iter().map(|w| format!("{set_name} {}: {w}", c.label())).collect::<Vec<_>>(), Default::default())
             }
             _ => {
-                let (bytes, w) = s.photocraft_psd(ts, &channels)?;
-                (bytes, w.into_iter().map(|w| format!("{set_name}: {w}")).collect())
+                let (bytes, w, sent) = s.photocraft_psd(ts, &channels)?;
+                (bytes, w.into_iter().map(|w| format!("{set_name}: {w}")).collect(), sent)
             }
         };
         warnings.extend(w);
@@ -376,7 +389,7 @@ fn send(s: &mut Session, p: &Value) -> Result<Value> {
         // Sending again keeps the fills an earlier save made.
         let layers = s.photocraft.links.iter().find(|l| l.path == path && l.ts == ts).map(|l| l.layers.clone()).unwrap_or_default();
         s.photocraft.links.retain(|l| l.path != path);
-        s.photocraft.links.push(Link { path: path.clone(), ts, format, channels, modified, layers });
+        s.photocraft.links.push(Link { path: path.clone(), ts, format, channels, modified, layers, sent });
         files.push(path);
     }
     s.log.push(format!("Sent {} documents to {}", files.len(), dir.display()));
@@ -447,9 +460,16 @@ impl Session {
                 l.modified = Some(modified);
             }
             match self.show_photocraft_file(&link) {
-                Ok(layers) => {
+                Ok(Shown::Fills(layers)) => {
                     if let Some(l) = self.photocraft.links.get_mut(i) {
                         l.layers = layers;
+                    }
+                    self.log.push(format!("Updated {} from PhotoCraft", link.path.display()));
+                    updated.push(link.path.clone());
+                }
+                Ok(Shown::Stack(sent)) => {
+                    if let Some(l) = self.photocraft.links.get_mut(i) {
+                        l.sent = sent;
                     }
                     self.log.push(format!("Updated {} from PhotoCraft", link.path.display()));
                     updated.push(link.path.clone());
@@ -460,10 +480,11 @@ impl Session {
         updated
     }
 
-    /// Put every channel `link`'s file holds into its `PhotoCraft: <channel>` fill (created at
-    /// the top of the set when missing), as one undo step.
+    /// Bring in what PhotoCraft saved in `link`'s file, as one undo step: a PSD is mirrored into
+    /// the stack ([`crate::photocraft_sync`]); an OpenRaster file's merged image goes into its
+    /// `PhotoCraft: <channel>` fill (created at the top of the set when missing).
     #[cfg(not(target_arch = "wasm32"))]
-    fn show_photocraft_file(&mut self, link: &Link) -> Result<BTreeMap<Channel, LayerId>> {
+    fn show_photocraft_file(&mut self, link: &Link) -> Result<Shown> {
         use std::io::Read;
         let io = |e: std::io::Error| EngineError::Other(e.to_string());
         let file = std::fs::File::open(&link.path).map_err(io)?;
@@ -473,32 +494,20 @@ impl Session {
             return Err(EngineError::Other(format!("larger than {} MB", MAX_LINKED_BYTES >> 20)));
         }
         let err = |e: texturecraft_formats::FormatError| EngineError::Other(e.to_string());
-        let images = match link.format {
+        match link.format {
             Format::Ora => {
                 let c = link.channels.first().copied().ok_or_else(|| EngineError::Other("the link holds no channel".into()))?;
-                vec![(c, ora::read_merged(&bytes).map_err(err)?)]
+                let images = vec![(c, ora::read_merged(&bytes).map_err(err)?)];
+                self.show_photocraft_images(link.ts, &images, &link.layers).map(Shown::Fills)
             }
             Format::Psd => {
                 let doc = texturecraft_formats::psd::read_psd(&bytes).map_err(err)?;
-                let cache = self.caches.get(link.ts).ok_or_else(|| EngineError::Other(format!("no texture set {}", link.ts)))?;
-                if (doc.width, doc.height) != cache.size {
-                    return Err(EngineError::Other(format!(
-                        "the document is {}×{} but the texture set is {}×{}; resize it back to bring it in",
-                        doc.width, doc.height, cache.size.0, cache.size.1
-                    )));
-                }
-                let coverage = cache.gbuf.coverage_mask();
-                let mut notes = Vec::new();
-                let mut images = Vec::new();
-                for &c in &link.channels {
-                    let img = crate::photocraft_psd::composite(&doc, c, &coverage, &mut notes);
-                    images.push((c, ora::png16(&img).map_err(err)?));
-                }
+                self.update();
+                let (sent, notes) = self.edit(UPDATE, |s| crate::photocraft_sync::apply(s, link.ts, &doc, &link.sent))?;
                 self.log.extend(notes.into_iter().map(|n| format!("PhotoCraft: {}: {n}", link.path.display())));
-                images
+                Ok(Shown::Stack(sent))
             }
-        };
-        self.show_photocraft_images(link.ts, &images, &link.layers)
+        }
     }
 
     /// Show `png` as channel `c` of texture set `ts` through the fill `layer` (when it is still a
@@ -811,105 +820,241 @@ mod tests {
         assert_eq!(links_json(&s)[0]["format"], "psd");
     }
 
-    #[test]
-    fn a_psd_sent_back_unchanged_rebuilds_every_channel() {
-        let dir = tempdir("psd_same");
-        let mut s = session();
-        execute(&mut s, "layer.add.fill", &json!({"color": [0.2, 0.6, 0.9], "roughness": 0.7, "metallic": 1.0})).unwrap();
-        execute(&mut s, "mask.add.black", &Value::Null).unwrap();
-        execute(&mut s, "effect.add.generator", &json!({"generator": "position"})).unwrap();
-        execute(&mut s, "layer.add.fill", &json!({"roughness": 0.1})).unwrap();
-        let top = s.selected_layer().unwrap();
-        execute(&mut s, "layer.blend", &json!({"layer": top.0, "channel": "roughness", "mode": "multiply", "opacity": 0.5})).unwrap();
-        s.update();
-        let channels = [Channel::BaseColor, Channel::Roughness, Channel::Metallic];
-        let r = execute(&mut s, SEND, &json!({"dir": dir.path().display().to_string(), "channels": ["baseColor", "roughness", "metallic"], "open": false}))
-            .unwrap();
-        let doc = read_psd(std::path::Path::new(r["files"][0].as_str().unwrap()));
-        let coverage = s.caches[0].gbuf.coverage_mask();
-        let (w, h) = s.caches[0].size;
-        let mut notes = Vec::new();
-        for c in channels {
-            let img = crate::photocraft_psd::composite(&doc, c, &coverage, &mut notes);
-            let mut worst = 0i32;
-            for (x, y) in [(3, 5), (w / 4, h / 3), (w / 2, h / 2), (w - 7, h - 9), (w / 3, h - 20)] {
-                let i = (y as usize * w as usize + x as usize) * 4;
-                let want = encode_value(c, s.caches[0].composite.value(c, x, y));
-                for k in 0..4 {
-                    worst = worst.max((img.data[i + k] as i32 - want[k] as i32).abs());
+    /// A saved document's node as one to write again, as an editor would (ids kept).
+    fn rewrite(n: &psd::ReadLayer, (w, h): (u32, u32)) -> psd::Layer {
+        let mask = n.mask.as_ref().map(|m| {
+            let data = (0..w * h).map(|i| m.at((i % w) as i32, (i / w) as i32)).collect();
+            psd::encode_mask(&psd::Mask16 { width: w, height: h, data }).unwrap()
+        });
+        let kind = match &n.kind {
+            psd::ReadKind::Group(c) => psd::Kind::Group(c.iter().map(|c| rewrite(c, (w, h))).collect()),
+            psd::ReadKind::Pixels { x, y, image } => {
+                let mut img = Rgba16::transparent(w, h);
+                for (i, px) in image.data.as_chunks::<4>().0.iter().enumerate() {
+                    let (cx, cy) = (*x + (i as u32 % image.width) as i32, *y + (i as u32 / image.width) as i32);
+                    let o = (cy as usize * w as usize + cx as usize) * 4;
+                    img.data[o..o + 4].copy_from_slice(px);
                 }
+                psd::Kind::Pixels(psd::encode_pixels(&img).unwrap())
             }
-            assert!(worst < 300, "{c:?} differs by {worst}");
-        }
-        assert!(notes.is_empty(), "{notes:?}");
+        };
+        psd::Layer { id: n.id.unwrap_or(0), name: n.name.clone(), visible: n.visible, opacity: n.opacity, blend: n.blend, mask, comps: Vec::new(), kind }
     }
 
-    #[test]
-    fn a_psd_save_brings_every_channel_back_in_one_step_through_its_group_mask() {
-        let dir = tempdir("psd_live");
-        let mut s = session();
-        let r = execute(&mut s, SEND, &json!({"dir": dir.path().display().to_string(), "channels": ["baseColor", "roughness"], "open": false})).unwrap();
-        let path = std::path::PathBuf::from(r["files"][0].as_str().unwrap());
-        assert!(s.sync_photocraft().is_empty());
-        // PhotoCraft saves: one group whose mask shows only the right half, holding a green
-        // base colour, a roughness of 0.8 (hidden, as a comp would leave it) and a stray layer.
-        let (w, h) = s.caches[0].size;
-        let solid = |px: [u16; 4]| {
-            let mut img = Rgba16::transparent(w, h);
-            for p in img.data.as_chunks_mut::<4>().0 {
+    /// A new pixel layer, `px` where `right` (x ≥ half) or everywhere.
+    fn new_layer(name: &str, (w, h): (u32, u32), px: [u16; 4], right: bool) -> psd::Layer {
+        let mut img = Rgba16::transparent(w, h);
+        for (i, p) in img.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if !right || i as u32 % w >= w / 2 {
                 *p = px;
             }
-            psd::encode_pixels(&img).unwrap()
-        };
-        let mut mask = psd::Mask16 { width: w, height: h, data: vec![0; (w * h) as usize] };
-        for (i, v) in mask.data.iter_mut().enumerate() {
-            if i as u32 % w >= w / 2 {
-                *v = 65535;
-            }
         }
-        let layer = |name: &str, visible: bool, px: [u16; 4]| psd::Layer {
+        psd::Layer {
+            id: 0,
             name: name.into(),
-            visible,
+            visible: true,
             opacity: 1.0,
             blend: *b"norm",
             mask: None,
             comps: Vec::new(),
-            kind: psd::Kind::Pixels(solid(px)),
-        };
-        let r8 = (0.8f32 * 65535.0) as u16;
-        let group = psd::Layer {
-            name: "Paint".into(),
+            kind: psd::Kind::Pixels(psd::encode_pixels(&img).unwrap()),
+        }
+    }
+
+    /// Save `layers` over `path` as PhotoCraft would, `n` seconds later than the last save.
+    fn save(path: &std::path::Path, layers: Vec<psd::Layer>, (w, h): (u32, u32), n: u64) {
+        let doc = psd::Document { layers, merged: Rgba16::transparent(w, h), comps: Vec::new() };
+        std::fs::write(path, psd::write_psd(&doc).unwrap()).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5 * n);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(later).unwrap();
+    }
+
+    fn send_psd(s: &mut Session, dir: &TempDir) -> (std::path::PathBuf, psd::ReadDocument) {
+        let r = execute(s, SEND, &json!({"dir": dir.path().display().to_string(), "channels": ["baseColor", "roughness", "height"], "open": false})).unwrap();
+        let path = std::path::PathBuf::from(r["files"][0].as_str().unwrap());
+        let doc = read_psd(&path);
+        (path, doc)
+    }
+
+    fn by_name(s: &Session, name: &str) -> LayerId {
+        s.doc
+            .project
+            .walk(0)
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| s.doc.project.layer(*id).unwrap().name == name)
+            .unwrap_or_else(|| panic!("no layer {name}"))
+    }
+
+    /// (name, kind, depth) of every layer, bottom → top.
+    fn shape(s: &Session) -> Vec<(String, &'static str, usize)> {
+        s.doc
+            .project
+            .walk(0)
+            .into_iter()
+            .map(|(id, d)| {
+                let l = s.doc.project.layer(id).unwrap();
+                (l.name.clone(), l.kind.name(), d)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_save_that_changes_nothing_leaves_the_stack_as_it_was() {
+        let dir = tempdir("psd_same");
+        let mut s = session();
+        execute(&mut s, "layer.add.fill", &json!({"color": [0.2, 0.6, 0.9], "roughness": 0.7})).unwrap();
+        let fill = s.selected_layer().unwrap();
+        execute(&mut s, "mask.add.black", &Value::Null).unwrap();
+        execute(&mut s, "effect.add.generator", &json!({"generator": "position"})).unwrap();
+        execute(&mut s, "layer.group", &json!({"layer": fill.0})).unwrap();
+        s.update();
+        let before = shape(&s);
+        let (w, h) = s.caches[0].size;
+        let values = |s: &Session| [Channel::BaseColor, Channel::Roughness].map(|c| s.caches[0].composite.value(c, w / 3, h / 2));
+        let was = values(&s);
+        let (path, doc) = send_psd(&mut s, &dir);
+        save(&path, doc.layers.iter().map(|n| rewrite(n, (w, h))).collect(), (w, h), 1);
+        assert_eq!(s.sync_photocraft(), vec![path]);
+        s.update();
+        assert_eq!(shape(&s), before);
+        // Still the procedural fill with its generator mask.
+        let l = s.doc.project.layer(fill).unwrap();
+        assert!(matches!(l.kind, LayerKind::Fill(_)));
+        assert!(l.mask.as_ref().unwrap().effects.iter().any(|e| matches!(e.kind, texturecraft_core::EffectKind::Generator(_))));
+        assert_eq!(values(&s), was);
+        assert!(!s.log.iter().any(|l| l.contains("PhotoCraft: ") && l.contains('"')), "{:?}", s.log);
+    }
+
+    #[test]
+    fn new_folders_and_layers_come_in_by_name_into_their_channels() {
+        let dir = tempdir("psd_new");
+        let mut s = session();
+        let (path, doc) = send_psd(&mut s, &dir);
+        let (w, h) = s.caches[0].size;
+        // In PhotoCraft: a new folder holding a hidden text layer and three named layers on the
+        // right half, above everything that was sent.
+        let r4 = (0.4f32 * 65535.0).round() as u16;
+        let text = psd::Layer {
+            id: 0,
+            name: "Text".into(),
             visible: true,
             opacity: 1.0,
             blend: *b"pass",
-            mask: Some(psd::encode_mask(&mask).unwrap()),
+            mask: None,
             comps: Vec::new(),
             kind: psd::Kind::Group(vec![
-                layer("Notes", true, [65535, 65535, 65535, 65535]),
-                layer("Base color", true, [0, 65535, 0, 65535]),
-                layer("Roughness", false, [r8, r8, r8, 65535]),
+                psd::Layer { visible: false, ..new_layer("Lorem Ipsum", (w, h), [65535, 65535, 65535, 65535], true) },
+                new_layer("Base Color", (w, h), [0, 65535, 0, 65535], true),
+                new_layer("Height", (w, h), [0, 0, 0, 65535], true),
+                new_layer("rough", (w, h), [r4, r4, r4, 65535], true),
             ]),
         };
-        let doc = psd::Document { layers: vec![group], merged: Rgba16::transparent(w, h), comps: vec!["Base color".into(), "Roughness".into()] };
-        std::fs::write(&path, psd::write_psd(&doc).unwrap()).unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
-        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
-        let undo_before = s.undo.len();
-        assert_eq!(s.sync_photocraft(), vec![path.clone()]);
-        assert_eq!(s.undo.len(), undo_before + 1, "both channels are one undo step");
+        let mut layers = vec![text];
+        layers.extend(doc.layers.iter().map(|n| rewrite(n, (w, h))));
+        // An editor numbers new layers itself; these get small ids, as PhotoCraft's do.
+        let mut bytes_doc = layers;
+        if let psd::Kind::Group(kids) = &mut bytes_doc[0].kind {
+            for (i, k) in kids.iter_mut().enumerate() {
+                k.id = i as u32 + 1;
+            }
+        }
+        bytes_doc[0].id = 9;
+        save(&path, bytes_doc.clone(), (w, h), 1);
+        let undo = s.undo.len();
+        assert_eq!(s.sync_photocraft().len(), 1);
+        assert_eq!(s.undo.len(), undo + 1, "one undo step");
         s.update();
+        // The folder and its layers, in the document's order (bottom → top), as paint layers.
+        let shape = shape(&s);
+        let top: Vec<_> = shape.iter().rev().take(5).cloned().collect();
+        assert_eq!(
+            top,
+            [
+                ("Lorem Ipsum".to_string(), "paint", 1),
+                ("Base Color".to_string(), "paint", 1),
+                ("Height".to_string(), "paint", 1),
+                ("rough".to_string(), "paint", 1),
+                ("Text".to_string(), "group", 0),
+            ]
+        );
+        assert!(!shape.iter().any(|(n, _, _)| n.starts_with("PhotoCraft")), "{shape:?}");
+        let ch = |name: &str| s.doc.project.layer(by_name(&s, name)).unwrap().channels.clone();
+        assert_eq!(ch("Base Color").keys().collect::<Vec<_>>(), [&Channel::BaseColor]);
+        assert_eq!(ch("rough").keys().collect::<Vec<_>>(), [&Channel::Roughness]);
+        assert!(ch("Lorem Ipsum").values().all(|b| b.mode == BlendMode::Disable), "no channel on");
+        assert!(!s.doc.project.layer(by_name(&s, "Lorem Ipsum")).unwrap().visible);
+        assert!(s.log.iter().any(|l| l.contains("\"Lorem Ipsum\": no channel")), "{:?}", s.log);
         let comp = &s.caches[0].composite;
         let (right, left) = ((w * 3 / 4, h / 2), (w / 4, h / 2));
         let base = comp.value(Channel::BaseColor, right.0, right.1);
-        assert!(base[1] > 0.9 && base[0] < 0.1, "{base:?}");
-        assert!((comp.value(Channel::Roughness, right.0, right.1)[0] - 0.8).abs() < 1e-2);
-        // Where the group mask hides the paint, the channels keep their defaults.
-        let d = Channel::Roughness.default_value()[0];
-        assert!((comp.value(Channel::Roughness, left.0, left.1)[0] - d).abs() < 1e-2);
-        assert_eq!(s.photocraft.links[0].layers.len(), 2);
-        assert!(s.log.iter().any(|l| l.contains("\"Notes\"")), "{:?}", s.log);
+        assert!(base[1] > 0.99 && base[0] < 0.01, "{base:?}");
+        assert!((comp.value(Channel::Roughness, right.0, right.1)[0] - 0.4).abs() < 1e-3);
+        assert!((comp.value(Channel::Height, right.0, right.1)[0] + 1.0).abs() < 1e-3);
+        assert!((comp.value(Channel::Roughness, left.0, left.1)[0] - Channel::Roughness.default_value()[0]).abs() < 1e-3);
+
+        // Saving again without changes brings nothing in twice.
+        save(&path, bytes_doc, (w, h), 2);
+        assert_eq!(s.sync_photocraft().len(), 1);
+        assert_eq!(s.doc.project.walk(0).len(), shape.len());
+
+        // The layer with no channel gets one in TextureCraft; its white becomes roughness 1.
+        let lorem = by_name(&s, "Lorem Ipsum");
+        execute(&mut s, "layer.assignChannel", &json!({"layer": lorem.0, "channel": "roughness"})).unwrap();
+        let l = s.doc.project.layer(lorem).unwrap();
+        assert_eq!(l.channels.keys().collect::<Vec<_>>(), [&Channel::Roughness]);
+        assert_eq!(l.channels[&Channel::Roughness].mode, BlendMode::Normal);
+        let px = s.doc.pixels.layer(lorem, Channel::Roughness).unwrap().get(right.0, right.1);
+        assert_eq!(&px[..2], &[65535, 65535]);
+        assert!(s.doc.pixels.layer(lorem, Channel::BaseColor).is_none());
+        assert!(execute(&mut s, "layer.assignChannel", &json!({"layer": lorem.0, "channel": "nope"})).is_err());
+        let folder = by_name(&s, "Text");
+        assert!(execute(&mut s, "layer.assignChannel", &json!({"layer": folder.0, "channel": "roughness"})).is_err());
+    }
+
+    #[test]
+    fn edits_to_sent_layers_change_those_layers_and_removals_remove_them() {
+        let dir = tempdir("psd_edit");
+        let mut s = session();
+        execute(&mut s, "layer.add.fill", &json!({"color": [1.0, 0.0, 0.0], "roughness": 0.2})).unwrap();
+        let red = s.selected_layer().unwrap();
+        execute(&mut s, "layer.rename", &json!({"layer": red.0, "name": "Red"})).unwrap();
+        execute(&mut s, "mask.add.black", &Value::Null).unwrap();
+        let paint = by_name(&s, "Layer 1");
+        let (path, doc) = send_psd(&mut s, &dir);
+        let (w, h) = s.caches[0].size;
+        // In PhotoCraft: Red's mask shows the right half, its roughness is repainted 0.9, the
+        // group is renamed, and the paint layer is deleted.
+        let mut layers: Vec<psd::Layer> = doc.layers.iter().filter(|n| n.name != "Layer 1").map(|n| rewrite(n, (w, h))).collect();
+        let half: Vec<u16> = (0..w * h).map(|i| if i % w >= w / 2 { 65535 } else { 0 }).collect();
+        let g = &mut layers[0];
+        g.name = "Red paint".into();
+        g.mask = Some(psd::encode_mask(&psd::Mask16 { width: w, height: h, data: half }).unwrap());
+        let r9 = (0.9f32 * 65535.0).round() as u16;
+        if let psd::Kind::Group(kids) = &mut g.kind {
+            let rough = kids.iter_mut().find(|k| k.name == "Roughness").unwrap();
+            let id = rough.id;
+            *rough = psd::Layer { id, visible: false, ..new_layer("Roughness", (w, h), [r9, r9, r9, 65535], false) };
+        }
+        save(&path, layers, (w, h), 1);
+        let before = s.doc.clone();
+        assert_eq!(s.sync_photocraft().len(), 1);
+        s.update();
+        let l = s.doc.project.layer(red).unwrap();
+        assert_eq!(l.name, "Red paint");
+        assert!(matches!(l.kind, LayerKind::Paint), "painted on, so a paint layer");
+        assert!(matches!(l.mask.as_ref().unwrap().effects[..], [texturecraft_core::Effect { kind: texturecraft_core::EffectKind::Paint, .. }]));
+        assert!(s.doc.project.layer(paint).is_err(), "removed in PhotoCraft");
+        let comp = &s.caches[0].composite;
+        let (right, left) = ((w * 3 / 4, h / 2), (w / 4, h / 2));
+        let base = comp.value(Channel::BaseColor, right.0, right.1);
+        assert!(base[0] > 0.99 && base[1] < 0.01, "{base:?}");
+        assert!((comp.value(Channel::Roughness, right.0, right.1)[0] - 0.9).abs() < 1e-3);
+        assert!((comp.value(Channel::Roughness, left.0, left.1)[0] - Channel::Roughness.default_value()[0]).abs() < 1e-3);
+        assert!(s.log.iter().any(|l| l.contains("now a paint layer")), "{:?}", s.log);
+        // One undo brings it all back.
         execute(&mut s, "edit.undo", &Value::Null).unwrap();
-        assert!(s.doc.project.walk(0).iter().all(|(id, _)| !s.doc.project.layer(*id).unwrap().name.starts_with("PhotoCraft")));
+        assert_eq!(s.doc.project, before.project);
     }
 
     #[test]

@@ -275,6 +275,12 @@ fn layer_tree(app: &mut TextureCraftApp, ui: &mut Ui, id: LayerId, depth: usize)
     }
 }
 
+/// The channels a paint layer with no channel on can take (None when it has one on).
+fn channel_choices(app: &TextureCraftApp, layer: &Layer) -> Option<Vec<texturecraft_engine::core::Channel>> {
+    let none_on = matches!(layer.kind, texturecraft_engine::core::LayerKind::Paint) && layer.channels.values().all(|b| b.mode == BlendMode::Disable);
+    none_on.then(|| app.session.doc.project.texture_set(app.session.ts()).map(|t| t.channel_list()).unwrap_or_default())
+}
+
 fn layer_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, depth: usize) {
     let tk = Tokens::get(ui.ctx());
     let selected = app.session.selected_layer() == Some(layer.id);
@@ -472,6 +478,23 @@ fn layer_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, depth: usize
         if r.changed() {
             app.run("layer.blend", json!({"layer": layer.id.0, "channel": ch.id(), "opacity": op / 100.0}));
         }
+    } else if let Some(choices) = channel_choices(app, layer) {
+        // A paint layer brought in with no channel on (its name named none): pick one here.
+        let r = ui
+            .interact(blend_rect.union(op_rect), ui.scope_id().with(("assign", layer.id.0)), Sense::click())
+            .on_hover_text(tr("This layer has no channel on: choose the channel its painting is for"));
+        p.text(blend_rect.right_center() - vec2(10.0, 0.0), egui::Align2::RIGHT_CENTER, ic::WARNING, egui::FontId::proportional(12.0), tk.warning);
+        p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, ic::CARET_DOWN, egui::FontId::proportional(8.0), tk.text_dim);
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(160.0);
+            ui.label(RichText::new(tr("Choose channel")).strong());
+            for c in choices {
+                if ui.button(tr(c.label())).clicked() {
+                    app.run("layer.assignChannel", json!({"layer": layer.id.0, "channel": c.id()}));
+                    ui.close();
+                }
+            }
+        });
     } else {
         p.text(blend_rect.right_center(), egui::Align2::RIGHT_CENTER, tr("off"), egui::FontId::proportional(11.0), tk.text_dim);
     }

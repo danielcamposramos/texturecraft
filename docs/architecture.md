@@ -69,6 +69,30 @@ The CPU compositor is the reference for everything users see and export. Export
 (`formats::export`) reads the same composite, adds height-to-normal (Sobel) combined with the
 normal channel and baked normals by reoriented normal mapping, and packs channels per preset.
 
+### Layer-panel thumbnails
+
+The Layers panel shows each layer's content (in the displayed channel), its mask and every effect
+stage as small pictures. `compose::thumb::render` runs the same compositor on a *cut* copy of the
+project: the requested layer is forced visible at Normal / 100 %, without its mask for content,
+and with its effect list truncated after the previewed effect (a hidden effect shows the result
+it bypasses). Lower layers remain available when the preview reads anchor points; only the requested
+layer is drawn. Instances use their source's channels. Paint and fill layers are flattened to
+(value, coverage), so empty texels are transparent; folders composite their children. Colors are
+encoded linear to sRGB, data channels raw. Everything is evaluated on a 64 px G-buffer of the mesh
+(painted tiles are resampled), never at the set's resolution, and the main composite is never touched.
+
+`engine::thumbs::ThumbService` runs it off the UI thread: an immutable `ThumbSnapshot` (the
+project, copy-on-write pixel tiles, baked maps, images and the cached 64 px G-buffer) is rebuilt
+only when the document really differs (compared at most every 120 ms while it keeps changing), a
+worker thread renders one job at a time (inline, one per frame, on wasm32), results of an older
+snapshot are dropped. At most two jobs, including stale generations, retain snapshots in the worker.
+Collecting a result requests another frame to display it. An LRU of 96 pictures keeps the out-of-date
+picture on screen until its replacement arrives. Only rows on screen ask for pictures; queued rows
+that scrolled away are dropped. Baked-map changes are checked by shared buffer identity, without
+scanning full-resolution float arrays on the UI thread. Run `perf::bench_layer_thumbs_4k` in release mode to measure snapshot
+construction and content, mask and stage rendering on a ten-layer 4096 set. Run
+`thumbs::tests::benchmark_unchanged_4k_baked_snapshot` to measure comparisons with 256 MiB of baked maps.
+
 ## Undo
 
 `Session::edit` snapshots the `Document` (project + pixels + baked maps + resources) before a

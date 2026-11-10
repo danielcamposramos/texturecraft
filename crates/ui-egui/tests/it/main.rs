@@ -16,6 +16,7 @@ mod filter_picker;
 mod history_panel;
 mod layer_clipboard;
 mod layer_rename;
+mod layers_panel;
 mod mask_value_swap;
 mod new_project_baked_maps;
 mod path_list;

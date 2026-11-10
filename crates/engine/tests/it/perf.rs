@@ -350,3 +350,50 @@ fn bench_8k_resize() {
     println!("[resize] dilation {:.2?}", t.elapsed());
     drop(d);
 }
+
+/// Layer-panel thumbnails on the 4K stack: the snapshot, each kind of picture, and a whole panel.
+#[test]
+#[ignore]
+fn bench_layer_thumbs_4k() {
+    use texturecraft_engine::compose::ThumbTarget;
+    use texturecraft_engine::core::Channel;
+    use texturecraft_engine::thumbs::{GbufCache, ThumbSnapshot};
+    let s = stack(4096);
+    let ts = s.ts();
+    let mut gbufs = GbufCache::default();
+    let t = Instant::now();
+    let snap = ThumbSnapshot::new(&s, ts, &mut gbufs).unwrap();
+    let first = t.elapsed();
+    let t = Instant::now();
+    let _again = ThumbSnapshot::new(&s, ts, &mut gbufs).unwrap();
+    let cached = t.elapsed();
+    let p = &s.doc.project;
+    let mut targets = Vec::new();
+    for l in p.layers.values() {
+        targets.push(("content", ThumbTarget::Content { layer: l.id, channel: Channel::BaseColor }));
+        if l.mask.is_some() {
+            targets.push(("mask", ThumbTarget::Mask { layer: l.id }));
+        }
+        for e in l.mask.iter().flat_map(|m| m.effects.iter()).chain(l.content_effects.iter()) {
+            targets.push(("stage", ThumbTarget::Stage { effect: e.id, channel: Channel::BaseColor }));
+        }
+    }
+    let mut per: std::collections::BTreeMap<&str, (Duration, usize, Duration)> = Default::default();
+    let all = Instant::now();
+    for (kind, target) in &targets {
+        let t = Instant::now();
+        let _ = snap.render(*target);
+        let d = t.elapsed();
+        let e = per.entry(kind).or_default();
+        e.0 += d;
+        e.1 += 1;
+        e.2 = e.2.max(d);
+    }
+    let total = all.elapsed();
+    eprintln!("layer thumbnails, 4096 set, {} layers, 64 px:", p.layers.len());
+    eprintln!("  snapshot: {:.2} ms first (with the 64 px G-buffer), {:.2} ms after", first.as_secs_f64() * 1e3, cached.as_secs_f64() * 1e3);
+    for (kind, (sum, n, max)) in per {
+        eprintln!("  {kind:8} {n:3} × avg {:.2} ms, max {:.2} ms", sum.as_secs_f64() * 1e3 / n as f64, max.as_secs_f64() * 1e3);
+    }
+    eprintln!("  every target once: {:.1} ms ({} pictures)", total.as_secs_f64() * 1e3, targets.len());
+}

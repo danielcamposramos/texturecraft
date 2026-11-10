@@ -1125,4 +1125,22 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     ("The file dialog couldn't be shown: {error}", "Não foi possível mostrar a caixa de diálogo de arquivos: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "O projeto mudou enquanto a caixa de diálogo estava aberta, então nada foi feito"),
+    ("A mask anchor reads as its mask's gray.", "Uma âncora de máscara é lida como o cinza da máscara."),
+    (
+        "Add an anchor point to a layer below to use its height as micro detail.",
+        "Adicione um ponto de ancoragem a uma camada abaixo para usar a altura dela como microdetalhe.",
+    ),
+    ("Anchor points", "Pontos de ancoragem"),
+    ("Micro detail", "Microdetalhe"),
+    ("No anchor point below this layer", "Nenhum ponto de ancoragem abaixo desta camada"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "Altura pintada de um ponto de ancoragem abaixo: áreas elevadas são lidas como bordas, áreas rebaixadas como cavidades.",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "Grava o valor da máscara neste ponto. Efeitos de preenchimento e geradores em máscaras acima podem lê-lo.",
+    ),
+    ("Rename effect", "Renomear efeito"),
+    ("{layer} / mask / {name}", "{layer} / máscara / {name}"),
 ];

@@ -1122,4 +1122,22 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     ("The file dialog couldn't be shown: {error}", "ファイルダイアログを表示できませんでした: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "ダイアログを開いている間にプロジェクトが変更されたため、何も実行されませんでした"),
+    ("A mask anchor reads as its mask's gray.", "マスクのアンカーはマスクのグレーとして読み取られます。"),
+    (
+        "Add an anchor point to a layer below to use its height as micro detail.",
+        "下のレイヤーにアンカーポイントを追加すると、その高さをマイクロディテールとして使えます。",
+    ),
+    ("Anchor points", "アンカーポイント"),
+    ("Micro detail", "マイクロディテール"),
+    ("No anchor point below this layer", "このレイヤーの下にアンカーポイントがありません"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "下のアンカーポイントのペイントされた高さ：盛り上がった部分はエッジ、くぼんだ部分はキャビティとして読み取られます。",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "この位置のマスク値を記録します。上のマスクの塗りつぶしエフェクトとジェネレーターが読み取れます。",
+    ),
+    ("Rename effect", "エフェクト名を変更"),
+    ("{layer} / mask / {name}", "{layer} / マスク / {name}"),
 ];

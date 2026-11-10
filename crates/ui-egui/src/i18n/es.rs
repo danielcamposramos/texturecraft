@@ -1131,4 +1131,22 @@ pub const TABLE: &[(&str, &str)] = &[
         "The project changed while the dialog was open, so nothing was done",
         "El proyecto cambió mientras el cuadro de diálogo estaba abierto, así que no se hizo nada",
     ),
+    ("A mask anchor reads as its mask's gray.", "Un ancla de máscara se lee como el gris de su máscara."),
+    (
+        "Add an anchor point to a layer below to use its height as micro detail.",
+        "Añade un punto de anclaje a una capa inferior para usar su altura como microdetalle.",
+    ),
+    ("Anchor points", "Puntos de anclaje"),
+    ("Micro detail", "Microdetalle"),
+    ("No anchor point below this layer", "Ningún punto de anclaje bajo esta capa"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "Altura pintada de un punto de anclaje inferior: las zonas elevadas se leen como bordes y las hundidas como cavidades.",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "Registra el valor de la máscara en este punto. Los efectos de relleno y los generadores de las máscaras superiores pueden leerlo.",
+    ),
+    ("Rename effect", "Renombrar efecto"),
+    ("{layer} / mask / {name}", "{layer} / máscara / {name}"),
 ];

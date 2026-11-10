@@ -97,6 +97,72 @@ fn anchor_points_feed_masks_above() {
 }
 
 #[test]
+fn anchor_points_in_masks_record_the_mask_for_layers_above() {
+    let mut s = session();
+    let low = id(execute(&mut s, "layer.add.fill", &json!({"color": [0.0, 0.0, 0.0]})).unwrap(), "layer");
+    execute(&mut s, "mask.add.black", &Value::Null).unwrap();
+    execute(&mut s, "effect.add.fill", &json!({"value": 0.4})).unwrap();
+    let anchor = id(execute(&mut s, "effect.add.anchor", &json!({"target": "mask", "name": "Wear"})).unwrap(), "effect");
+    let layer = s.doc.project.layer(LayerId(low)).unwrap();
+    assert!(layer.mask.as_ref().unwrap().effects.iter().any(|e| e.id.0 == anchor), "in the mask");
+    assert!(layer.content_effects.is_empty(), "not on the content");
+    // Without a target it still goes on the content, as before.
+    let content = id(execute(&mut s, "effect.add.anchor", &json!({"layer": low})).unwrap(), "effect");
+    assert!(s.doc.project.layer(LayerId(low)).unwrap().content_effects.iter().any(|e| e.id.0 == content));
+
+    // Folders take anchors in their masks only.
+    let folder = id(execute(&mut s, "layer.add.group", &Value::Null).unwrap(), "layer");
+    assert!(execute(&mut s, "effect.add.anchor", &json!({"layer": folder})).is_err(), "folder content");
+    execute(&mut s, "effect.add.anchor", &json!({"layer": folder, "target": "mask"})).unwrap();
+
+    execute(&mut s, "layer.add.fill", &json!({"color": [1.0, 1.0, 1.0]})).unwrap();
+    execute(&mut s, "mask.add.black", &Value::Null).unwrap();
+    execute(&mut s, "effect.add.fill", &json!({"anchor": anchor})).unwrap();
+    // The low layer shows at 0.4 (black over the 0.5 default), the top one at the anchor's 0.4.
+    let low_shown = 0.5 * 0.6;
+    let expected = low_shown + (1.0 - low_shown) * 0.4;
+    assert!(close(center(&mut s, Channel::BaseColor), [expected; 3]), "{:?}", center(&mut s, Channel::BaseColor));
+}
+
+#[test]
+fn generators_read_an_anchor_height_as_micro_detail() {
+    let mut s = session();
+    let low = id(execute(&mut s, "layer.add.fill", &json!({"height": 0.5})).unwrap(), "layer");
+    let anchor = id(execute(&mut s, "effect.add.anchor", &Value::Null).unwrap(), "effect");
+    let top = id(execute(&mut s, "layer.add.fill", &json!({"color": [1.0, 1.0, 1.0]})).unwrap(), "layer");
+
+    // The anchor must be below; `microAmount` needs an anchor; ids must be numbers.
+    assert!(execute(&mut s, "effect.add.generator", &json!({"layer": low, "microAnchor": anchor})).is_err());
+    assert!(execute(&mut s, "effect.add.generator", &json!({"microAmount": 0.5})).is_err());
+    assert!(execute(&mut s, "effect.add.generator", &json!({"microAnchor": "x"})).is_err());
+    assert!(execute(&mut s, "effect.add.generator", &json!({"microAnchor": low})).is_err(), "not an anchor point");
+
+    let generator = id(execute(&mut s, "effect.add.generator", &json!({"generator": "curvature", "noise": 0.0})).unwrap(), "effect");
+    let plain = center(&mut s, Channel::BaseColor);
+    execute(&mut s, "effect.set", &json!({"effect": generator, "microAnchor": anchor, "microAmount": 1.0})).unwrap();
+    let raised = center(&mut s, Channel::BaseColor);
+    assert!(raised[0] > plain[0] + 0.1, "{plain:?} -> {raised:?}");
+    let inspect = execute(&mut s, "project.inspect", &Value::Null).unwrap();
+    assert!(inspect.to_string().contains(&format!("\"micro\":{{\"amount\":1.0,\"anchor\":{anchor}}}")), "{inspect}");
+
+    // The amount alone keeps the anchor; null removes the micro detail.
+    execute(&mut s, "effect.set", &json!({"effect": generator, "microAmount": 0.0})).unwrap();
+    assert!(close(center(&mut s, Channel::BaseColor), plain));
+    execute(&mut s, "effect.set", &json!({"effect": generator, "microAnchor": null})).unwrap();
+    assert!(s.doc.project.effect(LayerId(generator)).map(|(_, e)| matches!(&e.kind, EffectKind::Generator(g) if g.micro.is_none())).unwrap());
+    assert!(execute(&mut s, "effect.set", &json!({"effect": anchor, "microAmount": 0.5})).is_err(), "generators only");
+
+    // A copied generator with micro detail needs the anchor below its new layer.
+    execute(&mut s, "effect.set", &json!({"effect": generator, "microAnchor": anchor})).unwrap();
+    execute(&mut s, "layer.select", &json!({"layer": top, "target": generator})).unwrap();
+    execute(&mut s, "effect.copy", &json!({"effect": generator})).unwrap();
+    execute(&mut s, "layer.select", &json!({"layer": low})).unwrap();
+    assert!(execute(&mut s, "effect.paste", &json!({"target": "mask"})).is_err());
+    let back = Session::from_project_bytes(&s.to_project_bytes().unwrap()).unwrap();
+    assert_eq!(back.doc.project, s.doc.project);
+}
+
+#[test]
 fn painting_into_a_content_paint_effect() {
     let mut s = session();
     execute(&mut s, "layer.add.fill", &json!({"roughness": 0.3})).unwrap();

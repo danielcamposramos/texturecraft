@@ -1094,4 +1094,19 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "\"{layer}\" لا يمكن تعبئتها: حدد طبقة رسم أو قناع طبقة"),
     ("The file dialog couldn't be shown: {error}", "تعذر عرض نافذة الملفات: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "تغيّر المشروع أثناء فتح النافذة، لذا لم يُنفَّذ أي إجراء"),
+    ("A mask anchor reads as its mask's gray.", "تُقرأ نقطة الارتكاز في القناع كرمادي ذلك القناع."),
+    ("Add an anchor point to a layer below to use its height as micro detail.", "أضف نقطة ارتكاز إلى طبقة أدناه لاستخدام ارتفاعها كتفاصيل دقيقة."),
+    ("Anchor points", "نقاط الارتكاز"),
+    ("Micro detail", "تفاصيل دقيقة"),
+    ("No anchor point below this layer", "لا توجد نقطة ارتكاز أسفل هذه الطبقة"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "الارتفاع المرسوم من نقطة ارتكاز أدناه: تُقرأ المناطق البارزة كحواف والمنخفضة كتجاويف.",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "تسجّل قيمة القناع عند هذه النقطة. يمكن لتأثيرات التعبئة والمولّدات في الأقنعة أعلاه قراءتها.",
+    ),
+    ("Rename effect", "إعادة تسمية التأثير"),
+    ("{layer} / mask / {name}", "{layer} / القناع / {name}"),
 ];

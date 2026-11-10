@@ -1107,4 +1107,22 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "\"{layer}\"은(는) 채울 수 없습니다: 페인트 레이어나 레이어 마스크를 선택하세요"),
     ("The file dialog couldn't be shown: {error}", "파일 대화 상자를 표시할 수 없습니다: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "대화 상자가 열려 있는 동안 프로젝트가 변경되어 아무 작업도 수행하지 않았습니다"),
+    ("A mask anchor reads as its mask's gray.", "마스크의 앵커는 마스크의 회색 값으로 읽힙니다."),
+    (
+        "Add an anchor point to a layer below to use its height as micro detail.",
+        "아래 레이어에 앵커 포인트를 추가하면 그 높이를 마이크로 디테일로 사용할 수 있습니다.",
+    ),
+    ("Anchor points", "앵커 포인트"),
+    ("Micro detail", "마이크로 디테일"),
+    ("No anchor point below this layer", "이 레이어 아래에 앵커 포인트가 없습니다"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "아래 앵커 포인트의 페인트된 높이: 솟은 부분은 가장자리로, 들어간 부분은 캐비티로 읽힙니다.",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "이 지점의 마스크 값을 기록합니다. 위쪽 마스크의 채우기 효과와 생성기가 읽을 수 있습니다.",
+    ),
+    ("Rename effect", "효과 이름 바꾸기"),
+    ("{layer} / mask / {name}", "{layer} / 마스크 / {name}"),
 ];

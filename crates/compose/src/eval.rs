@@ -9,8 +9,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 use texturecraft_core::{
     BakedMap, BlendMode, BlockScales, Channel, ChannelKind, CompareOp, CurvatureDetail, CurvatureMode, Effect, EffectKind, Fill, Filter, Generator,
-    GeneratorKind, HeightMask, Layer, LayerId, LayerKind, Mask, MaskBackground, NormalFormat, Project, Projection, Source, TextureSet, TileGrid, blend1,
-    blend3, lum, mix3, per_unit,
+    GeneratorKind, HeightMask, Layer, LayerId, LayerKind, Mask, MaskBackground, MicroDetail, NormalFormat, Project, Projection, Source, TextureSet, TileGrid,
+    blend1, blend3, lum, mix3, per_unit,
 };
 use texturecraft_geom::glam::{Vec2, Vec3};
 use texturecraft_geom::{Mesh, NO_TRI, UvGBuffer};
@@ -202,6 +202,8 @@ enum Content<'a> {
 }
 
 struct EffectPlan<'a> {
+    /// The effect id (an anchor point records under it).
+    id: LayerId,
     kind: &'a EffectKind,
     blend: BlendMode,
     opacity: f32,
@@ -852,6 +854,7 @@ fn effect_plans<'a>(inp: &Inputs<'a>, effects: &'a [Effect], tile_x: u32, tile_y
                 _ => None,
             };
             EffectPlan {
+                id: effect.id,
                 kind: &effect.kind,
                 blend: effect.blend,
                 opacity: effect.opacity,
@@ -945,19 +948,22 @@ fn plan_node<'a>(
         // `content_layer` already followed instance links.
         LayerKind::Instance { .. } => return None,
     };
+    let mask = layer_mask(inp.project, id).and_then(|m| mask_plan(inp, id, m, tx, ty, fields));
+    // Anchors in the mask record even where the layer draws nothing.
+    let mask_anchor = mask.as_ref().is_some_and(|m| m.effects.iter().any(|e| matches!(e.kind, EffectKind::Anchor)));
     // A paint layer with nothing painted (and not being painted) or added by its content
     // effects contributes nothing.
     if let Content::Paint { preview: false } = content
         && chans.iter().all(|c| c.data.is_none() && c.effects.is_empty())
+        && !mask_anchor
     {
         return None;
     }
-    if chans.is_empty() {
+    if chans.is_empty() && !mask_anchor {
         return None;
     }
-    let mask = layer_mask(inp.project, id).and_then(|m| mask_plan(inp, id, m, tx, ty, fields));
     let anchors = if fx { anchor_cuts(&layer.content_effects) } else { Vec::new() };
-    let has_anchor = !anchors.is_empty() || matches!(&content, Content::Group(nodes) if nodes.iter().any(|n| n.has_anchor));
+    let has_anchor = !anchors.is_empty() || mask_anchor || matches!(&content, Content::Group(nodes) if nodes.iter().any(|n| n.has_anchor));
     // The geometry mask is the layer's own (an instance in another set has other parts).
     let parts = own.geometry_mask.as_ref().map(|names| inp.mesh.submeshes.iter().map(|s| names.contains(&s.name)).collect());
     Some(Node { id, content, chans, mask, anchors, has_anchor, height_mask: layer.height_mask, parts })
@@ -1200,14 +1206,18 @@ impl<'a, 'b> Texel<'a, 'b> {
                     ChannelKind::Signed => [acc[0] * 2.0 - 1.0; 3],
                 }
             }
-            Source::Anchor { anchor, channel } => {
-                // An anchor not evaluated yet (above this layer, hidden) reads the channel default.
-                let v = self.anchors.iter().rev().find(|(id, _)| id == anchor).and_then(|(_, acc)| acc.get(channel.index()).copied());
-                let v = v.unwrap_or_else(|| channel.default_value());
-                let gray = matches!(channel.kind(), ChannelKind::Color | ChannelKind::NormalMap) && matches!(kind, ChannelKind::Scalar | ChannelKind::Signed);
-                if gray { [lum(v); 3] } else { v }
-            }
+            Source::Anchor { anchor, channel } => self.anchor_value(*anchor, *channel, kind),
         }
+    }
+
+    /// The value anchor point `anchor` recorded for `channel`, read as `kind` (colors read as gray
+    /// where a scalar is needed). An anchor not evaluated yet (above this layer, hidden) reads the
+    /// channel default.
+    fn anchor_value(&self, anchor: LayerId, channel: Channel, kind: ChannelKind) -> [f32; 3] {
+        let v = self.anchors.iter().rev().find(|(id, _)| *id == anchor).and_then(|(_, acc)| acc.get(channel.index()).copied());
+        let v = v.unwrap_or_else(|| channel.default_value());
+        let gray = matches!(channel.kind(), ChannelKind::Color | ChannelKind::NormalMap) && matches!(kind, ChannelKind::Scalar | ChannelKind::Signed);
+        if gray { [lum(v); 3] } else { v }
     }
 
     fn generator(&mut self, generator: &Generator, curvature_sizes: Option<&CurvatureSizes>) -> f32 {
@@ -1221,6 +1231,10 @@ impl<'a, 'b> Texel<'a, 'b> {
             (GeneratorKind::ThinAreas, _) => 1.0 - self.baked(BakedMap::Thickness).unwrap_or(1.0),
             (GeneratorKind::Position, _) => coords.pos.dot(Vec3::from(generator.direction).try_normalize().unwrap_or(Vec3::Y)) * 0.5 + 0.5,
             (GeneratorKind::Direction, _) => coords.nrm.dot(Vec3::from(generator.direction).try_normalize().unwrap_or(Vec3::Y)) * 0.5 + 0.5,
+        };
+        let signal = match generator.micro {
+            Some(micro) => signal + self.micro_detail(generator.kind, micro),
+            None => signal,
         };
         let signal = if generator.noise_amount > 0.0 {
             let noise = world_noise(coords.pos, generator.noise_scale, generator.seed);
@@ -1241,6 +1255,21 @@ impl<'a, 'b> Texel<'a, 'b> {
         let ramp = ((signal - (threshold - softness)) / (2.0 * softness)).clamp(0.0, 1.0);
         let value = ramp * ramp * (3.0 - 2.0 * ramp);
         if generator.invert { 1.0 - value } else { value }
+    }
+
+    /// How a generator's micro detail moves its signal at this texel: the anchor's height (0 where
+    /// the anchor is not evaluated yet) as an edge where raised and a cavity where recessed.
+    fn micro_detail(&self, kind: GeneratorKind, micro: MicroDetail) -> f32 {
+        let height = self.anchor_value(micro.anchor, Channel::Height, ChannelKind::Signed)[0];
+        let amount = if micro.amount.is_finite() { micro.amount.clamp(0.0, 1.0) } else { 0.0 };
+        let response = height.clamp(-1.0, 1.0) * amount;
+        match kind {
+            GeneratorKind::Curvature | GeneratorKind::EdgeWear => response,
+            // Dirt gathers in dents; dents are occluded.
+            GeneratorKind::Dirt => -response,
+            GeneratorKind::AmbientOcclusion => response,
+            GeneratorKind::ThinAreas | GeneratorKind::Position | GeneratorKind::Direction => 0.0,
+        }
     }
 
     /// The curvature of `detail`'s mode at this texel: each detail size's edges and cavities, weighted and combined like a screen blend.
@@ -1286,8 +1315,17 @@ impl<'a, 'b> Texel<'a, 'b> {
             value = filtered;
             skip = filtered_index + 1;
         }
+        // Anchors under the precomputed filter: evaluate the stack up to the last of them (only
+        // to record them; like a cut content stack, filters below them read as point filters).
+        if let Some(last) = plan.effects.iter().take(skip).rposition(|e| matches!(e.kind, EffectKind::Anchor)) {
+            self.mask_effects(plan, plan.background, 0, last + 1);
+        }
+        self.mask_effects(plan, value, skip, plan.effects.len())
+    }
 
-        for effect in plan.effects.iter().skip(skip) {
+    /// Mask effects `from..to` of `plan` over `value`, recording the anchors among them.
+    fn mask_effects(&mut self, plan: &MaskPlan, mut value: f32, from: usize, to: usize) -> f32 {
+        for effect in plan.effects.iter().take(to).skip(from) {
             let opacity = effect.opacity.clamp(0.0, 1.0);
             match effect.kind {
                 EffectKind::Paint | EffectKind::Path(_) => {
@@ -1341,8 +1379,10 @@ impl<'a, 'b> Texel<'a, 'b> {
                     let result = if pass { 1.0 } else { 0.0 };
                     value += (result - value) * opacity;
                 }
+                // Every channel of a mask anchor reads the mask's gray.
+                EffectKind::Anchor => self.anchors.push((effect.id, [[value.clamp(0.0, 1.0); 3]; NCH])),
                 // Content-only effects
-                EffectKind::Material(_) | EffectKind::Anchor => {}
+                EffectKind::Material(_) => {}
             }
         }
         value.clamp(0.0, 1.0)
@@ -2927,6 +2967,79 @@ soft {soft:?}"
         // An anchor above its reader is not evaluated yet: it reads the channel default (0).
         f.project.move_layer(low, 1).unwrap();
         assert!(close(run(&f, None).value(Channel::BaseColor, 5, 5), [0.5; 3]));
+    }
+
+    /// A white fill layer on top whose mask reads `anchor` (any channel: a mask anchor is gray).
+    fn anchor_reader(f: &mut Fixture, anchor: LayerId) -> LayerId {
+        let top = fill_layer(&mut f.project, [1.0; 3], 0.5);
+        let mut mask = Mask::new(MaskBackground::Black);
+        let source = Source::Anchor { anchor, channel: Channel::Roughness };
+        mask.effects.push(Effect::new(f.project.alloc_id(), EffectKind::Fill { source, projection: Projection::default() }));
+        f.project.layer_mut(top).unwrap().mask = Some(mask);
+        top
+    }
+
+    #[test]
+    fn mask_anchors_record_the_mask_value_at_their_place() {
+        let mut f = fixture();
+        let low = fill_layer(&mut f.project, [0.0; 3], 0.5);
+        let (gray, anchor, full) = (f.project.alloc_id(), f.project.alloc_id(), f.project.alloc_id());
+        let mut mask = Mask::new(MaskBackground::Black);
+        mask.effects.push(Effect::new(gray, EffectKind::Fill { source: Source::Uniform([0.4; 3]), projection: Projection::default() }));
+        mask.effects.push(Effect::new(anchor, EffectKind::Anchor));
+        mask.effects.push(Effect::new(full, EffectKind::Fill { source: Source::Uniform([1.0; 3]), projection: Projection::default() }));
+        f.project.layer_mut(low).unwrap().mask = Some(mask.clone());
+        anchor_reader(&mut f, anchor);
+        // The low layer shows fully (black), the top one at the 0.4 the anchor recorded.
+        assert!(close(run(&f, None).value(Channel::BaseColor, 5, 5), [0.4; 3]));
+
+        // Under a blur precomputed over the region the anchor still records its own place.
+        mask.effects.push(Effect::new(f.project.alloc_id(), EffectKind::Filter(Filter::Blur { radius: 32.0 })));
+        f.project.layer_mut(low).unwrap().mask = Some(mask.clone());
+        let v = run(&f, None).value(Channel::BaseColor, 5, 5);
+        assert!(close(v, [0.4; 3]), "{v:?}");
+
+        // A paint layer with nothing painted draws nothing (the base stays 0.5) but still records
+        // the anchors of its mask (0.5 + 0.5 × 0.4; unrecorded, the top would read 0 and stay 0.5).
+        f.project.layer_mut(low).unwrap().kind = LayerKind::Paint;
+        let v = run(&f, None).value(Channel::BaseColor, 5, 5);
+        assert!(close(v, [0.7; 3]), "{v:?}");
+    }
+
+    #[test]
+    fn generator_micro_detail_follows_the_anchor_height() {
+        let mut f = fixture();
+        let low = f.project.alloc_id();
+        let mut fill = Fill::default();
+        fill.sources.insert(Channel::Height, Source::Uniform([0.5; 3]));
+        f.project.insert_layer(0, Layer::new(low, "Bumps", LayerKind::Fill(fill), &[Channel::Height]), None, false).unwrap();
+        let anchor = content_fx(&mut f, low, EffectKind::Anchor);
+        let top = fill_layer(&mut f.project, [1.0; 3], 0.5);
+        let mut generator = Generator { level: 0.5, softness: 0.5, noise_amount: 0.0, detail: None, ..Generator::new(GeneratorKind::Curvature) };
+        let with = |f: &mut Fixture, generator: &Generator| {
+            let mut mask = Mask::new(MaskBackground::Black);
+            mask.effects.push(Effect::new(LayerId(900), EffectKind::Generator(generator.clone())));
+            f.project.layer_mut(top).unwrap().mask = Some(mask);
+            run(f, None).value(Channel::BaseColor, 5, 5)[0]
+        };
+        // No curvature map: flat mid gray, so the mask is 0.5 and the base color 0.75.
+        let flat = with(&mut f, &generator);
+        assert!((flat - 0.75).abs() < 0.02, "{flat}");
+        // Raised height reads as an edge.
+        generator.micro = Some(MicroDetail { anchor, amount: 1.0 });
+        assert!(with(&mut f, &generator) > flat + 0.2);
+        // Recessed height reads as a cavity; dirt gathers there.
+        if let LayerKind::Fill(fill) = &mut f.project.layer_mut(low).unwrap().kind {
+            fill.sources.insert(Channel::Height, Source::Uniform([-0.5; 3]));
+        }
+        assert!(with(&mut f, &generator) < flat - 0.2);
+        let dirt =
+            Generator { level: 0.5, softness: 0.5, noise_amount: 0.0, micro: Some(MicroDetail { anchor, amount: 1.0 }), ..Generator::new(GeneratorKind::Dirt) };
+        let plain = Generator { micro: None, ..dirt.clone() };
+        assert!(with(&mut f, &dirt) > with(&mut f, &plain) + 0.2);
+        // A hostile amount does nothing.
+        generator.micro = Some(MicroDetail { anchor, amount: f32::NAN });
+        assert!((with(&mut f, &generator) - flat).abs() < 0.02);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use egui_phosphor::regular as ic;
 use serde_json::{Value, json};
 use texturecraft_engine::core::{
     BakedMap, BlendMode, Channel, CurvatureDetail, CurvatureMode, Decal, Effect, EffectKind, Fill, Filter, Generator, GeneratorKind, Layer, LayerId, LayerKind,
-    LinkParam, MaterialLink, ProceduralKind, Projection, Source,
+    LinkParam, MaterialLink, MicroDetail, ProceduralKind, Projection, Source,
 };
 use texturecraft_engine::filter_lib::scalar_params;
 use texturecraft_engine::paint::{BrushAlpha, alphas};
@@ -221,7 +221,7 @@ fn effect_menu(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer) {
     let target = if content { "content" } else { "mask" };
     ui.label(caption(if content { tr("Add to the layer content") } else { tr("Add to the mask") }));
 
-    // Generators and compare masks always go to the mask, anchor points to the content
+    // Generators and compare masks always go to the mask; anchor points go where the others do
     let items = [
         (tr("Add generator"), "effect.add.generator", json!({})),
         (tr("Add paint"), "effect.add.paint", json!({"target": target})),
@@ -229,11 +229,10 @@ fn effect_menu(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer) {
         (tr("Add levels"), "effect.add.levels", json!({"target": target})),
         (tr("Add compare mask"), "effect.add.compare", json!({})),
         (tr("Add filter"), "effect.add.filter", json!({"target": target, "filter": NEW_FILTER})),
-        (tr("Add anchor point"), "effect.add.anchor", json!({})),
+        (tr("Add anchor point"), "effect.add.anchor", json!({"target": target})),
     ];
     for (label, command, params) in items {
-        let enabled = command != "effect.add.anchor" || !layer.is_group();
-        if !ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        if !ui.button(label).clicked() {
             continue;
         }
 
@@ -555,9 +554,17 @@ fn effect_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, stack: &[Ef
     let er = ui.interact(eye, ui.scope_id().with(("eff_eye", eid.0)), Sense::click()).on_hover_text(tr("Enable or disable the effect"));
     p.text(eye.center(), egui::Align2::CENTER_CENTER, if visible { ic::EYE } else { ic::EYE_SLASH }, egui::FontId::proportional(12.0), tk.text_dim);
     p.text(pos2(x0 + 22.0, rect.center().y), egui::Align2::LEFT_CENTER, glyph, egui::FontId::proportional(11.0), tk.text_dim);
-    p.text(pos2(x0 + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &e.name, egui::FontId::proportional(11.5), tk.text);
+    let renaming = app.ui.rename.as_ref().is_some_and(|(r, _)| *r == eid.0);
+    if renaming {
+        let name_rect = Rect::from_min_max(pos2(x0 + 36.0, rect.top() + 2.0), pos2(rect.right() - 4.0, rect.bottom() - 2.0));
+        effect_rename_editor(app, ui, name_rect, e);
+    } else {
+        p.text(pos2(x0 + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &e.name, egui::FontId::proportional(11.5), tk.text);
+    }
     if er.clicked() {
         app.run("effect.set", json!({"effect": eid.0, "visible": !visible}));
+    } else if resp.double_clicked() && !renaming {
+        app.ui.rename = Some((eid.0, e.name.clone()));
     } else if resp.clicked() {
         app.run("layer.select", json!({"layer": layer.id.0, "target": eid.0}));
     }
@@ -584,6 +591,10 @@ fn effect_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, stack: &[Ef
         app.run("effect.move", json!({"effect": src.0, "index": index}));
     }
     resp.context_menu(|ui| {
+        if ui.button(tr("Rename effect")).clicked() {
+            app.ui.rename = Some((eid.0, e.name.clone()));
+            ui.close();
+        }
         let keymap = app.ui.keymap.clone();
         // The row is selected before the paste runs, so a copied effect is all it needs.
         let paste = texturecraft_engine::effect_clipboard::clipboard_effect(&app.session).is_some();
@@ -607,6 +618,27 @@ fn effect_row(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, stack: &[Ef
             }
         }
     });
+}
+
+/// The name editor of effect row `e` in `rect`: Enter or a click elsewhere renames, Escape cancels.
+fn effect_rename_editor(app: &mut TextureCraftApp, ui: &mut Ui, rect: Rect, e: &Effect) {
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let Some((_, buf)) = app.ui.rename.as_mut() else { return };
+    // Escape reaches us instead of just unfocusing the field, so it can cancel.
+    let filter = egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, escape: true, ..Default::default() };
+    let r = child.add(egui::TextEdit::singleline(buf).desired_width(rect.width()).font(egui::FontId::proportional(11.5)).event_filter(filter));
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.rename = None;
+    } else if r.lost_focus() {
+        let name = buf.trim().to_string();
+        app.ui.rename = None;
+        if !name.is_empty() && name != e.name {
+            app.run("effect.set", json!({"effect": e.id.0, "name": name}));
+        }
+    } else if !r.has_focus() {
+        // Only until the field has focus (see the layer rename editor).
+        r.request_focus();
+    }
 }
 
 /// The Geometry mask tool: what a click does, and the selected layer's parts.
@@ -1681,8 +1713,36 @@ fn anchors_below(app: &TextureCraftApp, reader: LayerId) -> Vec<(LayerId, String
         .map(|(id, _)| id)
         .take_while(|id| *id != reader)
         .filter_map(|id| p.layers.get(&id))
-        .flat_map(|l| l.content_effects.iter().filter(|e| matches!(e.kind, EffectKind::Anchor)).map(move |e| (e.id, format!("{} / {}", l.name, e.name))))
+        .flat_map(|l| {
+            let mask = l.mask.iter().flat_map(|m| m.effects.iter()).filter(|e| matches!(e.kind, EffectKind::Anchor));
+            let mask = mask.map(|e| (e.id, trf("{layer} / mask / {name}", &[("layer", &l.name), ("name", &e.name)])));
+            let content = l.content_effects.iter().filter(|e| matches!(e.kind, EffectKind::Anchor)).map(|e| (e.id, format!("{} / {}", l.name, e.name)));
+            content.chain(mask).collect::<Vec<_>>()
+        })
         .collect()
+}
+
+/// Whether anchor point `anchor` sits in a mask (it then records the mask's gray, whatever the channel).
+fn anchor_in_mask(app: &TextureCraftApp, anchor: LayerId) -> bool {
+    let p = &app.session.doc.project;
+    p.effect(anchor).and_then(|(owner, _)| p.layers.get(&owner)).is_some_and(|l| l.mask.iter().flat_map(|m| m.effects.iter()).any(|e| e.id == anchor))
+}
+
+/// The anchor points of `anchors` as menu entries under their own heading (a note when there
+/// are none); returns the one clicked.
+fn anchor_entries(ui: &mut Ui, anchors: &[(LayerId, String)], current: Option<LayerId>) -> Option<LayerId> {
+    ui.separator();
+    ui.label(caption(tr("Anchor points")));
+    if anchors.is_empty() {
+        ui.label(RichText::new(tr("No anchor point below this layer")).color(Tokens::get(ui.ctx()).text_dim));
+    }
+    let mut picked = None;
+    for (anchor, label) in anchors {
+        if ui.selectable_label(current == Some(*anchor), trf("Anchor: {name}", &[("name", label)])).clicked() {
+            picked = Some(*anchor);
+        }
+    }
+    picked
 }
 
 fn anchor_label(app: &TextureCraftApp, anchor: LayerId, channel: Channel) -> String {
@@ -1895,14 +1955,9 @@ fn fill_channel(app: &mut TextureCraftApp, ui: &mut Ui, fill: &Fill, base: &Valu
                         if let Some(name) = image_menu(app, ui) {
                             app.run("layer.fill.set", set(json!({"image": name})));
                         }
-                        if !anchors.is_empty() {
-                            ui.separator();
-                        }
-                        for (a, label) in anchors {
-                            if ui.button(trf("Anchor: {name}", &[("name", label)])).clicked() {
-                                app.run("layer.fill.set", set(json!({"anchor": a.0})));
-                                ui.close();
-                            }
+                        if let Some(a) = anchor_entries(ui, anchors, fill.source(c).anchor()) {
+                            app.run("layer.fill.set", set(json!({"anchor": a.0})));
+                            ui.close();
                         }
                     })
                     .response
@@ -2006,7 +2061,7 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
     ui.separator();
 
     match &effect.kind {
-        EffectKind::Generator(generator) => generator_properties(app, ui, id, generator),
+        EffectKind::Generator(generator) => generator_properties(app, ui, id, generator, layer.id),
         EffectKind::Levels(levels) => {
             ui.label(caption(tr("Levels")));
             levels_histogram(app, ui, layer, eid, (levels.in_low, levels.in_high));
@@ -2037,10 +2092,8 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
                 if ui.selectable_label(matches!(source, Source::Uniform(_)), tr("Uniform value")).clicked() {
                     app.run("effect.set", json!({"effect": id, "value": 1.0}));
                 }
-                for (anchor, label) in &anchors {
-                    if ui.selectable_label(source.anchor() == Some(*anchor), trf("Anchor: {name}", &[("name", label)])).clicked() {
-                        app.run("effect.set", json!({"effect": id, "anchor": anchor.0}));
-                    }
+                if let Some(anchor) = anchor_entries(ui, &anchors, source.anchor()) {
+                    app.run("effect.set", json!({"effect": id, "anchor": anchor.0}));
                 }
             });
             match source {
@@ -2049,6 +2102,9 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
                     if let Some(merge) = slider_edit(ui, tr("Value"), &mut value, 0.0..=1.0, 2) {
                         app.run("effect.set", json!({"effect": id, "value": value, "merge": merge}));
                     }
+                }
+                Source::Anchor { anchor, .. } if anchor_in_mask(app, *anchor) => {
+                    ui.label(RichText::new(tr("A mask anchor reads as its mask's gray.")).color(tk.text_dim));
                 }
                 Source::Anchor { channel, .. } => {
                     let channels = app.session.doc.project.texture_set(app.session.ts()).map(|set| set.channel_list()).unwrap_or_default();
@@ -2074,10 +2130,12 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
         }
         EffectKind::Anchor => {
             ui.label(caption(tr("Anchor point")));
-            ui.label(
-                RichText::new(tr("Records the stack up to this layer. Fill effects in masks (and fill layers) above can read it as a source."))
-                    .color(tk.text_dim),
-            );
+            let text = if anchor_in_mask(app, eid) {
+                tr("Records the mask value at this point. Fill effects and generators in masks above can read it.")
+            } else {
+                tr("Records the stack up to this layer. Fill effects in masks (and fill layers) above can read it as a source.")
+            };
+            ui.label(RichText::new(text).color(tk.text_dim));
         }
         EffectKind::Paint => {
             let hint = if layer.content_effects.iter().any(|content| content.id == eid) {
@@ -2120,7 +2178,7 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
 }
 
 /// The settings of generator effect `id`.
-fn generator_properties(app: &mut TextureCraftApp, ui: &mut Ui, id: u64, generator: &Generator) {
+fn generator_properties(app: &mut TextureCraftApp, ui: &mut Ui, id: u64, generator: &Generator, reader: LayerId) {
     let tk = Tokens::get(ui.ctx());
     ui.label(caption(tr("Generator")));
     egui::ComboBox::from_id_salt("gen_kind").selected_text(tr(generator.kind.label())).show_ui(ui, |ui| {
@@ -2150,8 +2208,40 @@ fn generator_properties(app: &mut TextureCraftApp, ui: &mut Ui, id: u64, generat
     if matches!(generator.kind, GeneratorKind::Curvature | GeneratorKind::EdgeWear) {
         curvature_detail_properties(app, ui, id, generator.detail.as_ref());
     }
+    if !matches!(generator.kind, GeneratorKind::ThinAreas | GeneratorKind::Position | GeneratorKind::Direction) {
+        micro_detail_properties(app, ui, id, generator.micro, reader);
+    }
     if !app.session.doc.baked.contains_key(&app.session.ts()) {
         ui.label(RichText::new(format!("{} {}", ic::WARNING, tr("Bake mesh maps (F8) for curvature, AO and thickness based generators."))).color(tk.warning));
+    }
+}
+
+/// The micro detail of generator effect `id` on layer `reader`: an anchor point below whose height
+/// moves the generated mask, and how much.
+fn micro_detail_properties(app: &mut TextureCraftApp, ui: &mut Ui, id: u64, micro: Option<MicroDetail>, reader: LayerId) {
+    let tk = Tokens::get(ui.ctx());
+    ui.label(caption(tr("Micro detail")))
+        .on_hover_text(tr("Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities."));
+    let anchors = anchors_below(app, reader);
+    let current = match micro {
+        Some(m) => anchors.iter().find(|(a, _)| *a == m.anchor).map_or_else(|| tr("missing").to_string(), |(_, label)| label.clone()),
+        None => tr("None").to_string(),
+    };
+    combo(ui, tr("Anchor point"), current, |ui| {
+        if ui.selectable_label(micro.is_none(), tr("None")).clicked() {
+            app.run("effect.set", json!({"effect": id, "microAnchor": null}));
+        }
+        if let Some(anchor) = anchor_entries(ui, &anchors, micro.map(|m| m.anchor)) {
+            app.run("effect.set", json!({"effect": id, "microAnchor": anchor.0}));
+        }
+    });
+    if let Some(m) = micro {
+        let mut amount = m.amount;
+        if let Some(merge) = slider_edit(ui, tr("Amount"), &mut amount, 0.0..=1.0, 2) {
+            app.run("effect.set", json!({"effect": id, "microAmount": amount, "merge": merge}));
+        }
+    } else if anchors.is_empty() {
+        ui.label(RichText::new(tr("Add an anchor point to a layer below to use its height as micro detail.")).color(tk.text_dim));
     }
 }
 

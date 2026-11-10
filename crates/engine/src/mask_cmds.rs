@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use texturecraft_core::{
     BlendMode, Channel, CompareOp, CurvatureDetail, CurvatureMode, Effect, EffectKind, Filter, Generator, GeneratorKind, LayerId, Levels, Mask, MaskBackground,
-    Procedural, ProceduralKind, Project, Source,
+    MicroDetail, Procedural, ProceduralKind, Project, Source,
 };
 
 use crate::commands::{CommandSpec, always, bad, blend_param, boolp, channel_param, color_param, f32p, has_layer, layer_param, strp, u64p};
@@ -49,7 +49,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add generator",
             ["Layers", "Effects"],
             None,
-            "{layer?, name?, generator?: edgeWear|dirt|thinAreas|curvature|ambientOcclusion|position|direction, level?, softness?, noise?, invert?, mode?: edges|cavities|both|raw, sizes?: [7 weights 0..1, finest first] (curvature and edgeWear)}",
+            "{layer?, name?, generator?: edgeWear|dirt|thinAreas|curvature|ambientOcclusion|position|direction, level?, softness?, noise?, invert?, mode?: edges|cavities|both|raw, sizes?: [7 weights 0..1, finest first] (curvature and edgeWear), microAnchor?: anchor effect id below (its height as micro detail: edges where raised, cavities where recessed; null removes it), microAmount?: 0..1 (0.5)}",
             has_layer,
             add_generator
         ),
@@ -85,16 +85,16 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add anchor point",
             ["Layers", "Effects"],
             None,
-            "{layer?, name?} (records the stack up to this layer for fills and masks above: effect.add.fill {anchor})",
+            "{layer?, target?: content|mask (content), name?} (on the content it records the stack up to this layer, in a mask the mask value at that point; fills, masks and generators above read it: effect.add.fill {anchor}, effect.add.generator {microAnchor})",
             has_layer,
-            |s, p| push_effect(s, p, EffectKind::Anchor, BlendMode::Normal)
+            add_anchor
         ),
         cmd!(
             "effect.set",
             "Edit effect",
             [],
             None,
-            "{effect, visible?, blend?, opacity?, name?, filter?: id from filter.list (a filter effect only: swaps its type, keeping position, blend and opacity; its current id edits it in place), level?, softness?, noise?, noiseScale?, invert?, mode?, sizes?, value?, anchor?, anchorChannel?, inLow?, inHigh?, gamma?, outLow?, outHigh?, tolerance?, colors?: [[r,g,b], ...] (a color selection's ID colors), filter parameters (see effect.add.filter)}",
+            "{effect, visible?, blend?, opacity?, name?, filter?: id from filter.list (a filter effect only: swaps its type, keeping position, blend and opacity; its current id edits it in place), level?, softness?, noise?, noiseScale?, invert?, mode?, sizes?, microAnchor?: id|null, microAmount?, value?, anchor?, anchorChannel?, inLow?, inHigh?, gamma?, outLow?, outHigh?, tolerance?, colors?: [[r,g,b], ...] (a color selection's ID colors), filter parameters (see effect.add.filter)}",
             has_layer,
             set
         ),
@@ -375,6 +375,45 @@ fn size_weights(command: &str, value: &Value) -> Result<[f32; CurvatureDetail::S
     Ok(weights)
 }
 
+/// An anchor point on the layer content (the default, as before anchors went on masks) or, with
+/// `target: "mask"`, in its mask.
+fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut params = p.clone();
+    if p.get("target").is_none()
+        && let Some(o) = params.as_object_mut()
+    {
+        o.insert("target".into(), json!("content"));
+    }
+    push_effect(s, &params, EffectKind::Anchor, BlendMode::Normal)
+}
+
+/// A generator's micro detail from `microAnchor` / `microAmount` for a generator on layer
+/// `reader` (None: leave it as it is; `Some(None)`: remove it).
+fn micro_param(s: &Session, cmd: &str, reader: LayerId, params: &Value, current: Option<MicroDetail>) -> Result<Option<Option<MicroDetail>>> {
+    let amount = match params.get("microAmount") {
+        Some(value) => Some(value.as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad(cmd, "`microAmount` must be a number 0..1"))?.clamp(0.0, 1.0) as f32),
+        None => None,
+    };
+    let anchor = match params.get("microAnchor") {
+        None => current.map(|m| m.anchor),
+        Some(Value::Null) => return Ok(Some(None)),
+        Some(value) => Some(LayerId(value.as_u64().ok_or_else(|| bad(cmd, "`microAnchor` must be an anchor effect id or null"))?)),
+    };
+    let Some(anchor) = anchor else {
+        return match amount {
+            Some(_) => Err(bad(cmd, "give `microAnchor` before `microAmount`: the generator has no micro detail")),
+            None => Ok(None),
+        };
+    };
+    if params.get("microAnchor").is_none() && amount.is_none() {
+        return Ok(None);
+    }
+    // The same rule as fills: an anchor below, in the same texture set.
+    anchor_source(s, cmd, reader, anchor, Channel::Height)?;
+    let amount = amount.or(current.map(|m| m.amount)).unwrap_or(MicroDetail::DEFAULT_AMOUNT);
+    Ok(Some(Some(MicroDetail { anchor, amount })))
+}
+
 fn add_generator(session: &mut Session, params: &Value) -> Result<Value> {
     let kind = match strp(params, "generator") {
         Some(name) => GeneratorKind::parse(name).ok_or_else(|| bad("effect.add.generator", format!("unknown generator `{name}`")))?,
@@ -382,6 +421,10 @@ fn add_generator(session: &mut Session, params: &Value) -> Result<Value> {
     };
     let mut generator = Generator::new(kind);
     generator_from("effect.add.generator", params, &mut generator)?;
+    let reader = layer_param(session, "effect.add.generator", params)?;
+    if let Some(micro) = micro_param(session, "effect.add.generator", reader, params, None)? {
+        generator.micro = micro;
+    }
     let blend = blend_param("effect.add.generator", params, "blend")?.unwrap_or(BlendMode::Normal);
     push_effect(session, params, EffectKind::Generator(generator), blend)
 }
@@ -471,6 +514,13 @@ fn set(session: &mut Session, params: &Value) -> Result<Value> {
         }
         _ => None,
     };
+    let micro = match session.doc.project.effect(effect) {
+        Some((owner, Effect { kind: EffectKind::Generator(generator), .. })) => micro_param(session, CMD, owner, params, generator.micro)?,
+        _ if params.get("microAnchor").is_some() || params.get("microAmount").is_some() => {
+            return Err(bad(CMD, "`microAnchor` and `microAmount` edit generator effects only"));
+        }
+        _ => None,
+    };
 
     // Naming the filter the effect already is edits its parameters like a plain effect.set
     let swapped = match strp(params, "filter") {
@@ -505,7 +555,12 @@ fn set(session: &mut Session, params: &Value) -> Result<Value> {
         }
 
         match &mut edited.kind {
-            EffectKind::Generator(generator) => generator_from(CMD, params, generator)?,
+            EffectKind::Generator(generator) => {
+                generator_from(CMD, params, generator)?;
+                if let Some(micro) = micro {
+                    generator.micro = micro;
+                }
+            }
             EffectKind::Levels(levels) => levels_from(params, levels),
             // The swapped filter was built with the parameters already
             EffectKind::Filter(_) if swaps_filter => {}

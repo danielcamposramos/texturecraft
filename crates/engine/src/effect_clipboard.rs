@@ -2,7 +2,7 @@
 //! clipboard: it holds a layer or an effect.
 
 use serde_json::{Value, json};
-use texturecraft_core::{EffectKind, LayerId, Mask, MaskBackground, Source};
+use texturecraft_core::{Channel, EffectKind, Generator, LayerId, Mask, MaskBackground, Source};
 
 use crate::commands::{CommandSpec, bad, has_layer, layer_param, strp};
 use crate::layer_ops::{empty_texel, fit};
@@ -91,6 +91,10 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     // A fill reading an anchor point needs one below its new layer.
     if let EffectKind::Fill { source: Source::Anchor { anchor, channel }, .. } = &effect.kind {
         anchor_source(s, CMD, owner, *anchor, *channel)?;
+    }
+    // So does a generator reading one as micro detail.
+    if let EffectKind::Generator(Generator { micro: Some(micro), .. }) = &effect.kind {
+        anchor_source(s, CMD, owner, micro.anchor, Channel::Height)?;
     }
     let (ts, _, _) = s.doc.project.locate(owner).ok_or_else(|| bad(CMD, "the layer is not in a stack"))?;
     let (size, channels) = s.doc.project.texture_set(ts).map(|t| (t.size(), t.channel_list()))?;

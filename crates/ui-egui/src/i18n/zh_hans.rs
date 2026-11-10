@@ -1053,4 +1053,19 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "“{layer}”无法填充：请选择绘画图层或图层遮罩"),
     ("The file dialog couldn't be shown: {error}", "无法显示文件对话框：{error}"),
     ("The project changed while the dialog was open, so nothing was done", "对话框打开期间项目已更改，因此未执行任何操作"),
+    ("A mask anchor reads as its mask's gray.", "蒙版中的锚点读取为该蒙版的灰度。"),
+    ("Add an anchor point to a layer below to use its height as micro detail.", "在下方图层添加锚点，即可将其高度用作微细节。"),
+    ("Anchor points", "锚点"),
+    ("Micro detail", "微细节"),
+    ("No anchor point below this layer", "此图层下方没有锚点"),
+    (
+        "Painted height from an anchor point below: raised areas read as edges, recessed ones as cavities.",
+        "下方锚点绘制的高度：凸起处读取为边缘，凹陷处读取为凹腔。",
+    ),
+    (
+        "Records the mask value at this point. Fill effects and generators in masks above can read it.",
+        "记录此处的蒙版值。上方蒙版中的填充效果和生成器可以读取它。",
+    ),
+    ("Rename effect", "重命名效果"),
+    ("{layer} / mask / {name}", "{layer} / 蒙版 / {name}"),
 ];

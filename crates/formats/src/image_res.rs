@@ -13,9 +13,13 @@ pub struct DecodedImage {
     pub srgb: bool,
 }
 
-/// Decode PNG, JPEG, TGA, TIFF, BMP, WEBP, EXR or HDR bytes.
+/// Texel cap of [`decode_image`]: the documented side limit squared (16384 x 16384), checked from
+/// the header so no larger image is ever allocated.
+pub const MAX_DECODE_TEXELS: u64 = MAX_IMAGE_SIZE as u64 * MAX_IMAGE_SIZE as u64;
+
+/// Decode PNG, JPEG, TGA, TIFF, BMP, WEBP, EXR or HDR bytes (at most [`MAX_DECODE_TEXELS`]).
 pub fn decode_image(bytes: &[u8]) -> Result<DecodedImage> {
-    decode_image_within(bytes, u64::MAX)
+    decode_image_within(bytes, MAX_DECODE_TEXELS)
 }
 
 /// [`decode_image`] for an image of at most `max_texels` (width × height), checked from the
@@ -99,5 +103,14 @@ mod tests {
         assert_eq!(decode_image_within(&png, 64).unwrap().width, 8);
         assert!(matches!(decode_image_within(&png, 63), Err(FormatError::TooLarge(_))));
         assert!(decode_image(&png).is_ok());
+    }
+
+    #[test]
+    fn decode_image_caps_texels_at_the_side_limit_squared() {
+        assert_eq!(MAX_DECODE_TEXELS, 1 << 28);
+        let mut png = Vec::new();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert!(decode_image_within(&png, MAX_DECODE_TEXELS).is_ok());
+        assert!(matches!(decode_image_within(&png, 3), Err(FormatError::TooLarge(_))));
     }
 }

@@ -20,8 +20,9 @@ use texturecraft_ui_egui::ControlRequest;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Listen on `127.0.0.1:port` and return the requests for the UI thread to answer
-/// ([`ControlRequest::reply`]). Bind or token failures are printed and leave the channel empty.
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+/// ([`ControlRequest::reply`]). With `confined` (`--read-root`/`--write-root` given) `command.run` refuses
+/// host paths, as `texturecraft-cli serve` does. Bind or token failures are printed and leave the channel empty.
+pub fn start(port: u16, ctx: egui::Context, confined: bool) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
@@ -43,12 +44,12 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
         }
     };
     eprintln!("texturecraft: control server listening on 127.0.0.1:{port}");
-    std::thread::spawn(move || accept(listener, &token, &tx, &ctx));
+    std::thread::spawn(move || accept(listener, &token, &tx, &ctx, confined));
     rx
 }
 
 /// Serve connections from `listener` (at most [`MAX_CONNECTIONS`] at once).
-fn accept(listener: TcpListener, token: &str, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+fn accept(listener: TcpListener, token: &str, tx: &Sender<ControlRequest>, ctx: &egui::Context, confined: bool) {
     let limiter = ConnectionLimiter::default();
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -59,7 +60,7 @@ fn accept(listener: TcpListener, token: &str, tx: &Sender<ControlRequest>, ctx: 
         let (tx, ctx, token) = (tx.clone(), ctx.clone(), token.to_string());
         std::thread::spawn(move || {
             let _permit = permit;
-            serve(stream, &token, &tx, &ctx);
+            serve(stream, &token, &tx, &ctx, confined);
         });
     }
 }
@@ -74,7 +75,7 @@ fn reply(out: &mut TcpStream, id: Value, mut reply: Value) -> bool {
 
 /// One connection: `auth` first (within [`AUTH_TIMEOUT`], one attempt), then requests
 /// forwarded to the UI thread one at a time until the client disconnects or idles out.
-fn serve(stream: TcpStream, token: &str, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+fn serve(stream: TcpStream, token: &str, tx: &Sender<ControlRequest>, ctx: &egui::Context, confined: bool) {
     let Ok(mut deadline) = AuthDeadline::start(&stream, AUTH_TIMEOUT).map(Some) else { return };
     let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
     let Ok(read) = stream.try_clone() else { return };
@@ -120,6 +121,18 @@ fn serve(stream: TcpStream, token: &str, tx: &Sender<ControlRequest>, ctx: &egui
             }
             continue;
         }
+        if confined
+            && method == "command.run"
+            && let Err(e) = texturecraft_automation::workspace::authorize_command(
+                params.get("id").and_then(Value::as_str).unwrap_or_default(),
+                params.get("params").unwrap_or(&Value::Null),
+            )
+        {
+            if !reply(&mut out, id, json!({"ok": false, "error": e.to_string()})) {
+                return;
+            }
+            continue;
+        }
         let (req, rrx) = ControlRequest::new(method, params);
         if tx.send(req).is_err() {
             return;
@@ -142,10 +155,14 @@ mod tests {
 
     /// A server on a free port whose app side answers every request with its method name.
     fn server() -> std::net::SocketAddr {
+        server_with(false)
+    }
+
+    fn server_with(confined: bool) -> std::net::SocketAddr {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = channel::<ControlRequest>();
-        std::thread::spawn(move || accept(listener, TOKEN, &tx, &egui::Context::default()));
+        std::thread::spawn(move || accept(listener, TOKEN, &tx, &egui::Context::default(), confined));
         std::thread::spawn(move || {
             for r in rx {
                 let _ = r.reply.send(json!({"ok": true, "result": r.method}));
@@ -194,6 +211,21 @@ mod tests {
         assert_eq!((pong["result"].clone(), pong["id"].clone()), (json!("ping"), json!(3)));
         assert_eq!(call(&mut w, &mut r, "not json").unwrap()["ok"], false);
         assert_eq!(call(&mut w, &mut r, r#"{"id":4,"method":"ping"}"#).unwrap()["id"], 4, "bad JSON keeps an authenticated connection");
+    }
+
+    #[test]
+    fn roots_refuse_host_paths_over_the_control_channel() {
+        let right = format!(r#"{{"id":1,"method":"auth","params":{{"token":"{TOKEN}"}}}}"#);
+        let run = r#"{"id":5,"method":"command.run","params":{"id":"file.open","params":{"path":"/etc/passwd"}}}"#;
+        let (mut w, mut r) = connect(server_with(true));
+        call(&mut w, &mut r, &right).unwrap();
+        let denied = call(&mut w, &mut r, run).unwrap();
+        assert_eq!((denied["ok"].clone(), denied["id"].clone()), (json!(false), json!(5)));
+        assert_eq!(call(&mut w, &mut r, r#"{"id":6,"method":"command.run","params":{"id":"layer.add.fill","params":{}}}"#).unwrap()["ok"], true);
+        // Without roots the command is forwarded unchanged.
+        let (mut w, mut r) = connect(server());
+        call(&mut w, &mut r, &right).unwrap();
+        assert_eq!(call(&mut w, &mut r, run).unwrap()["ok"], true);
     }
 
     #[test]

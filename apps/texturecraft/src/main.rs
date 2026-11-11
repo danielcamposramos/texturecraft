@@ -1,6 +1,6 @@
 //! TextureCraft desktop app.
 //!
-//! Usage: `texturecraft [project.tcraft | mesh.glb] [--control <port>] [--empty] [--version]`
+//! Usage: `texturecraft [project.tcraft | mesh.glb] [--control <port> [--read-root <dir>] [--write-root <dir>]] [--empty] [--version]`
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -9,6 +9,7 @@ mod control_server;
 mod gpu;
 mod window_frame;
 
+use texturecraft_automation::AuthorizedWorkspace;
 use texturecraft_engine::Session;
 use texturecraft_ui_egui::titlebar::TitleBar;
 use texturecraft_ui_egui::ui_state_store;
@@ -38,6 +39,8 @@ fn version() -> String {
 struct Args {
     file: Option<String>,
     control: Option<u16>,
+    /// `--read-root` / `--write-root` (or the `--automation-` spellings): confine the control channel.
+    roots: bool,
     empty: bool,
     gpu: Option<String>,
     power_pref: Option<eframe::wgpu::PowerPreference>,
@@ -48,7 +51,7 @@ fn parse_args() -> Result<Option<Args>, String> {
 }
 
 fn parse_args_from<I: IntoIterator<Item = String>>(it: I) -> Result<Option<Args>, String> {
-    let mut args = Args { file: None, control: None, empty: false, gpu: None, power_pref: None };
+    let mut args = Args { file: None, control: None, roots: false, empty: false, gpu: None, power_pref: None };
     let mut it = it.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -58,7 +61,7 @@ fn parse_args_from<I: IntoIterator<Item = String>>(it: I) -> Result<Option<Args>
             }
             "--help" | "-h" => {
                 println!(
-                    "{}\n\nUsage: texturecraft [project.tcraft | mesh file] [--control <port>] [--gpu <name>] [--power-pref <high|low|none>] [--empty]",
+                    "{}\n\nUsage: texturecraft [project.tcraft | mesh file] [--control <port> [--read-root <dir>] [--write-root <dir>]] [--gpu <name>] [--power-pref <high|low|none>] [--empty]",
                     version()
                 );
                 return Ok(None);
@@ -66,6 +69,14 @@ fn parse_args_from<I: IntoIterator<Item = String>>(it: I) -> Result<Option<Args>
             "--control" => {
                 let p = it.next().ok_or("--control needs a port")?;
                 args.control = Some(p.parse().map_err(|_| format!("invalid port `{p}`"))?);
+            }
+            "--read-root" | "--write-root" | "--automation-read-root" | "--automation-write-root" => {
+                let dir = it.next().ok_or_else(|| format!("{a} needs a directory"))?;
+                // Same fail-closed check as `texturecraft-cli serve`: the root must open.
+                let root = Some(std::path::Path::new(&dir));
+                let opened = if a.ends_with("read-root") { AuthorizedWorkspace::new(root, None) } else { AuthorizedWorkspace::new(None, root) };
+                opened.map_err(|e| e.to_string())?;
+                args.roots = true;
             }
             "--gpu" => {
                 let g = it.next().ok_or("--gpu needs a GPU name or pattern")?;
@@ -218,6 +229,7 @@ fn main() {
         std::process::exit(2);
     }
     let control = args.control;
+    let confined = args.roots;
     // The start window offers new, open and recent projects, unless a file was given or a script drives the app
     let start = args.file.is_none() && control.is_none();
     let r = eframe::run_native(
@@ -239,7 +251,7 @@ fn main() {
             app.ui.windows.start = start && app.ui.prefs.start_window;
             app.set_startup_update_check(checks_for_updates_at_start(control));
             if let Some(port) = control {
-                app.control = Some(control_server::start(port, cc.egui_ctx.clone()));
+                app.control = Some(control_server::start(port, cc.egui_ctx.clone(), confined));
             }
             Ok(Box::new(Shell {
                 app,

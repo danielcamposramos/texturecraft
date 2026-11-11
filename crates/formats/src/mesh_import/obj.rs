@@ -36,10 +36,14 @@ fn read_inner(bytes: &[u8]) -> Result<RawMesh> {
     let materials = materials.unwrap_or_default();
 
     let mut raw = RawMesh::default();
-    let (mut normals, mut uvs, mut colors) = (Some(Vec::new()), Some(Vec::new()), Vec::new());
+    let any_uvs = models.iter().any(|m| !m.mesh.indices.is_empty() && m.mesh.texcoords.len() == (m.mesh.positions.len() / 3) * 2);
+    let (mut normals, mut uvs, mut colors) = (Some(Vec::new()), any_uvs.then(Vec::new), Vec::new());
     let mut partial_uvs = false;
     for model in &models {
         let mesh = &model.mesh;
+        if mesh.indices.is_empty() {
+            continue;
+        }
         let vertex_count = mesh.positions.len() / 3;
         check_vertices(raw.positions.len().saturating_add(vertex_count))?;
 
@@ -56,14 +60,14 @@ fn read_inner(bytes: &[u8]) -> Result<RawMesh> {
         } else {
             normals = None;
         }
-        if mesh.texcoords.len() == vertex_count * 2 {
-            if let Some(v) = &mut uvs {
+        if let Some(v) = &mut uvs {
+            if mesh.texcoords.len() == vertex_count * 2 {
                 // OBJ UVs have their origin bottom-left
                 v.extend(mesh.texcoords.as_chunks::<2>().0.iter().map(|t| Vec2::new(t[0], 1.0 - t[1])));
+            } else {
+                v.extend(std::iter::repeat_n(Vec2::ZERO, vertex_count));
+                partial_uvs = true;
             }
-        } else {
-            partial_uvs |= vertex_count > 0 && !mesh.indices.is_empty();
-            uvs = None;
         }
 
         // `v x y z r g b`: objects without colors are white
@@ -94,8 +98,8 @@ fn read_inner(bytes: &[u8]) -> Result<RawMesh> {
         }
     }
 
-    if partial_uvs && models.iter().any(|model| !model.mesh.texcoords.is_empty()) {
-        raw.warnings.push("some objects have no UVs; the whole mesh was unwrapped automatically".into());
+    if partial_uvs {
+        raw.warnings.push("some objects have no UVs; default UVs were assigned".into());
     }
 
     raw.normals = normals;

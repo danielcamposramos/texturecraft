@@ -121,14 +121,16 @@ fn serve(stream: TcpStream, token: &str, tx: &Sender<ControlRequest>, ctx: &egui
             }
             continue;
         }
+        let command = params.get("id").and_then(Value::as_str).unwrap_or_default();
         if confined
             && method == "command.run"
-            && let Err(e) = texturecraft_automation::workspace::authorize_command(
-                params.get("id").and_then(Value::as_str).unwrap_or_default(),
-                params.get("params").unwrap_or(&Value::Null),
-            )
+            && texturecraft_automation::workspace::authorize_command(command, params.get("params").unwrap_or(&Value::Null)).is_err()
         {
-            if !reply(&mut out, id, json!({"ok": false, "error": e.to_string()})) {
+            // (the workspace tools its own message names are not on this channel: the file actions are in the window)
+            let error = format!(
+                "`{command}` with host paths is disabled on this control channel while --read-root/--write-root is set; use the file actions in the application window"
+            );
+            if !reply(&mut out, id, json!({"ok": false, "error": error})) {
                 return;
             }
             continue;
@@ -221,6 +223,8 @@ mod tests {
         call(&mut w, &mut r, &right).unwrap();
         let denied = call(&mut w, &mut r, run).unwrap();
         assert_eq!((denied["ok"].clone(), denied["id"].clone()), (json!(false), json!(5)));
+        let why = denied["error"].as_str().unwrap_or_default();
+        assert!(why.contains("application window") && !why.contains("project_open"), "{why}");
         assert_eq!(call(&mut w, &mut r, r#"{"id":6,"method":"command.run","params":{"id":"layer.add.fill","params":{}}}"#).unwrap()["ok"], true);
         // Without roots the command is forwarded unchanged.
         let (mut w, mut r) = connect(server());

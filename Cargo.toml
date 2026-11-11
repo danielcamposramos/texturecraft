@@ -5,7 +5,7 @@ exclude = ["vendor"]
 default-members = ["crates/core", "crates/texel", "crates/geom", "crates/compose", "crates/bake", "crates/formats", "crates/paint", "crates/engine", "crates/render", "crates/automation", "crates/ui-egui", "apps/texturecraft", "apps/texturecraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"

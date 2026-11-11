@@ -4259,7 +4259,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "craft-menu",
  "craft-update",
@@ -4280,7 +4280,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-automation"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "cap-std",
@@ -4301,7 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-bake"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "rayon",
@@ -4313,7 +4313,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-cli"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "image",
  "serde_json",
@@ -4325,7 +4325,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-compose"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "half",
  "rayon",
@@ -4336,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-core"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4345,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-engine"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "epaint_default_fonts",
  "image",
@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-formats"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "exr",
@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-geom"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "glam 0.30.10",
  "mikktspace",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-paint"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "epaint_default_fonts",
  "harfrust",
@@ -4416,7 +4416,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-render"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -4435,11 +4435,11 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-texel"
-version = "0.3.1"
+version = "0.6.0"
 
 [[package]]
 name = "texturecraft-ui-egui"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "craft-dialogs",
@@ -4473,7 +4473,7 @@ dependencies = [
 
 [[package]]
 name = "texturecraft-web"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "js-sys",
@@ -5865,7 +5865,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.3.1"
+version = "0.6.0"
 dependencies = [
  "serde_json",
 ]

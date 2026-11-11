@@ -34,6 +34,7 @@ pub struct Manifest {
     pub name: String,
     pub graph: String,
     pub size: [u32; 2],
+    #[serde(deserialize_with = "bounded_maps")]
     pub maps: Vec<MapEntry>,
     #[serde(default)]
     pub parameters: Vec<LinkParam>,
@@ -42,6 +43,30 @@ pub struct Manifest {
     #[serde(default)]
     pub presets: Vec<LinkPreset>,
     pub source: String,
+}
+
+const MAPS_LIMIT_MSG: &str = "too many maps";
+
+/// Reads `maps` while enforcing `MAX_MAPS`, so a hostile manifest cannot make serde allocate every entry first.
+fn bounded_maps<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<MapEntry>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<MapEntry>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of maps")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(m) = seq.next_element()? {
+                if out.len() == MAX_MAPS {
+                    return Err(serde::de::Error::custom(MAPS_LIMIT_MSG));
+                }
+                out.push(m);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(V)
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -84,15 +109,15 @@ pub fn read_mcmat(bytes: &[u8]) -> Result<PortableMaterial> {
         }
         Ok(out)
     };
-    let manifest: Manifest = serde_json::from_slice(&read("material.json")?).map_err(|e| malformed(format!("material.json: {e}")))?;
+    let manifest: Manifest = serde_json::from_slice(&read("material.json")?).map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains(MAPS_LIMIT_MSG) { FormatError::TooLarge(format!("more than {MAX_MAPS} maps")) } else { malformed(format!("material.json: {msg}")) }
+    })?;
     if manifest.format != FORMAT {
         return Err(malformed(format!("format `{}`", manifest.format)));
     }
     if manifest.version > VERSION {
         return Err(FormatError::Unsupported(format!("{KIND} version {} (this version reads up to {VERSION})", manifest.version)));
-    }
-    if manifest.maps.len() > MAX_MAPS {
-        return Err(FormatError::TooLarge(format!("{} maps (limit {MAX_MAPS})", manifest.maps.len())));
     }
     let maps = manifest.maps.iter().map(|m| Ok((m.usage.clone(), read(&m.file)?))).collect::<Result<Vec<_>>>()?;
     let source = read(&manifest.source)?;
@@ -186,6 +211,16 @@ mod tests {
         z.write_all(manifest.to_string().as_bytes()).unwrap();
         let bytes = z.finish().unwrap().into_inner();
         assert!(matches!(read_mcmat(&bytes), Err(FormatError::TooLarge(_))));
+    }
+
+    #[test]
+    fn manifest_map_list_is_bounded_while_parsing() {
+        let entry = r#"{"usage":"a","file":"b"}"#;
+        let head = r#"{"format":"craft-material","version":1,"name":"n","graph":"g","size":[4,4],"source":"s","maps":["#;
+        let json = |n: usize| format!("{head}{}]}}", vec![entry; n].join(","));
+        assert_eq!(serde_json::from_str::<Manifest>(&json(MAX_MAPS)).unwrap().maps.len(), MAX_MAPS);
+        let err = serde_json::from_str::<Manifest>(&json(100_000)).unwrap_err().to_string();
+        assert!(err.contains(MAPS_LIMIT_MSG), "{err}");
     }
 
     #[test]

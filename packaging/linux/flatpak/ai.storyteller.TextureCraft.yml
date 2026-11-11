@@ -18,6 +18,10 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: texturecraft
 finish-args:
+  # Release checks and downloads use HTTPS.
+  - --share=network
+  # The shared updater inspects and updates this installation via flatpak-spawn --host.
+  - --talk-name=org.freedesktop.Flatpak
   # Display: Wayland first; X11 only when no Wayland compositor is running.
   - --socket=wayland
   - --socket=fallback-x11
@@ -31,9 +35,6 @@ finish-args:
   # line, Open Recent, "Save" next to the original) work in the usual places.
   - --filesystem=xdg-pictures
   - --filesystem=xdg-documents
-  # Deliberately not granted: network (the optional --control server listens on 127.0.0.1 in
-  # the sandbox; `flatpak override --user --share=network ai.storyteller.texturecraft` exposes it to
-  # host agents) and home/host filesystem access.
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 modules:

@@ -192,6 +192,24 @@ mod tests {
         (inside, outside, ws)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_reference_read_stays_in_its_folder_and_under_its_cap() {
+        let (inside, _, ws) = roots("beneath");
+        std::fs::create_dir_all(inside.join("mesh")).unwrap();
+        std::fs::create_dir_all(inside.join("other")).unwrap();
+        std::fs::write(inside.join("mesh/tex.png"), b"pixels").unwrap();
+        std::fs::write(inside.join("other/secret.png"), b"secret").unwrap();
+        // a link to a sibling folder of the same workspace leaves the mesh's folder
+        std::os::unix::fs::symlink("../other/secret.png", inside.join("mesh/linked.png")).unwrap();
+        assert_eq!(ws.read_beneath("mesh", "tex.png", 6).unwrap(), b"pixels");
+        assert!(ws.read_beneath("mesh", "tex.png", 5).is_err(), "over the cap");
+        assert!(ws.read_beneath("mesh", "linked.png", 16).is_err(), "a link out of the folder");
+        assert!(ws.read_beneath("mesh", "../other/secret.png", 16).is_err());
+        std::fs::write(inside.join("top.png"), b"top").unwrap();
+        assert_eq!(ws.read_beneath(".", "top.png", 16).unwrap(), b"top");
+    }
+
     #[test]
     fn reads_and_writes_stay_in_the_root() {
         let (inside, _, ws) = roots("valid");

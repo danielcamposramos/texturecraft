@@ -185,7 +185,15 @@ impl Headless {
     fn read_mesh(&self, path: &str) -> Result<texturecraft_formats::MeshFile, AutomationError> {
         let bytes = self.read(path)?;
         let dir = Path::new(path).parent().and_then(|d| d.to_str()).filter(|d| !d.is_empty()).unwrap_or(".");
-        texturecraft_formats::self_contained_mesh(path, bytes, &mut |rel| self.read(&join(dir, rel)).ok()).map_err(|e| bad(format!("{path}: {e}")))
+        // The references stay in the mesh's folder (a link out of it is not followed) and are read up to the cap the
+        // importer keeps (a texture's, not the whole-file limit), whichever access the session has.
+        let cap = texturecraft_formats::mesh_import::reference_cap(path);
+        let mut read = |rel: &str| match &self.fs {
+            Filesystem::Workspace(w) => w.read_beneath(dir, rel, cap).ok(),
+            Filesystem::TrustedLocal => texturecraft_formats::mesh_import::read_mesh_reference(Path::new(dir), rel, cap),
+            Filesystem::Denied => None,
+        };
+        texturecraft_formats::self_contained_mesh(path, bytes, &mut read).map_err(|e| bad(format!("{path}: {e}")))
     }
 
     /// Add a high-definition mesh for baking from `path` (or, with `cage`, set the bake cage).

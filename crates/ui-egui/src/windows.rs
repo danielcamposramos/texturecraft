@@ -844,6 +844,15 @@ pub fn remember(app: &mut TextureCraftApp, path: &str) {
     app.ui.recent.truncate(10);
 }
 
+/// Most bytes of a saved UI layout: what loading one reads (a larger file is refused there, so it is not written).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LAYOUT_BYTES: usize = 16 << 20;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn layout_within_limit(len: usize) -> Result<(), String> {
+    if len > MAX_LAYOUT_BYTES { Err(format!("the UI layout is {len} bytes, over the {MAX_LAYOUT_BYTES} byte limit it is read back with")) } else { Ok(()) }
+}
+
 /// Window › Save / Load UI layout: panels, windows and view settings as a JSON file.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn layout_file(app: &mut TextureCraftApp, save: bool) {
@@ -856,11 +865,12 @@ pub fn layout_file(app: &mut TextureCraftApp, save: bool) {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| e.to_string())
                 .and_then(|_| serde_json::to_vec_pretty(&layout).map_err(|e| e.to_string()))
+                .and_then(|bytes| layout_within_limit(bytes.len()).map(|()| bytes))
                 .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
                 .map(|_| trf("Saved UI layout {path}", &[("path", &path.display())]))
         } else {
             // Layouts are small; bound both the initial size and any growth during the read
-            texturecraft_engine::formats::read_capped(path, 16 << 20)
+            texturecraft_engine::formats::read_capped(path, MAX_LAYOUT_BYTES as u64)
                 .map_err(|e| e.to_string())
                 .and_then(|bytes| serde_json::from_slice::<crate::UiState>(&bytes).map_err(|e| e.to_string()))
                 .map(|layout| {
@@ -1296,6 +1306,13 @@ pub fn export(app: &mut TextureCraftApp, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_layout_over_the_read_limit_is_not_saved() {
+        assert!(super::layout_within_limit(super::MAX_LAYOUT_BYTES).is_ok());
+        assert!(super::layout_within_limit(super::MAX_LAYOUT_BYTES + 1).is_err());
+    }
+
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT as _, Queryable as _};
 

@@ -51,22 +51,48 @@ pub fn self_contained_mesh(name: &str, bytes: Vec<u8>, read: &mut dyn FnMut(&str
     Ok(MeshFile { name, bytes, warnings })
 }
 
+/// The most bytes of one file a mesh may reference: FBX and USD reference textures, glTF also larger geometry buffers.
+pub fn reference_cap(mesh_name: &str) -> u64 {
+    if matches!(super::extension(mesh_name).as_str(), "fbx" | "usd" | "usda" | "usdc") { super::MAX_TEXTURE_BYTES } else { MAX_MESH_FILE_BYTES }
+}
+
 /// Read mesh file `path` with the files it references from its folder (see
 /// [`self_contained_mesh`]), each at most [`MAX_MESH_FILE_BYTES`].
+///
+/// The folder is opened first and held: the mesh file and every reference are then opened beneath
+/// that one handle, so a folder replaced by a link while the import runs cannot redirect the reads.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_mesh_file(path: &std::path::Path) -> Result<MeshFile> {
-    let bytes = crate::read_capped(path, MAX_MESH_FILE_BYTES)?;
     let directory = mesh_directory(path);
-
-    // FBX and USD reference textures; glTF also references larger geometry buffers
-    let cap = if matches!(super::extension(&path.to_string_lossy()).as_str(), "fbx" | "usd" | "usda" | "usdc") {
-        super::MAX_TEXTURE_BYTES
-    } else {
-        MAX_MESH_FILE_BYTES
-    };
     let root = cap_std::fs::Dir::open_ambient_dir(directory, cap_std::ambient_authority()).ok();
     let canonical_root = directory.canonicalize().ok();
+    // beneath the held folder; a mesh file that is a link out of it (or a folder that cannot be held) is read by its path, as before
+    let beneath = root.as_ref().zip(path.file_name()).and_then(|(root, name)| open_beneath(root, std::path::Path::new(name)));
+    let bytes = match beneath {
+        Some(file) => crate::file_read::read_open_file(file, path, MAX_MESH_FILE_BYTES)?,
+        None => crate::read_capped(path, MAX_MESH_FILE_BYTES)?,
+    };
+    let cap = reference_cap(&path.to_string_lossy());
     self_contained_mesh(&path.to_string_lossy(), bytes, &mut |relative| read_reference(root.as_ref()?, canonical_root.as_deref()?, relative, cap))
+}
+
+/// Read `relative` (a path below the mesh's folder `directory`, as [`self_contained_mesh`] asks for it), at most `cap`
+/// bytes, from a regular file that resolves inside that folder: links out of it are refused, and the read goes through
+/// a handle opened on the folder itself.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_mesh_reference(directory: &std::path::Path, relative: &str, cap: u64) -> Option<Vec<u8>> {
+    let root = cap_std::fs::Dir::open_ambient_dir(directory, cap_std::ambient_authority()).ok()?;
+    read_reference(&root, &directory.canonicalize().ok()?, relative, cap)
+}
+
+/// `relative` opened for reading beneath `root` (a FIFO is refused rather than waited on).
+#[cfg(not(target_arch = "wasm32"))]
+fn open_beneath(root: &cap_std::fs::Dir, relative: &std::path::Path) -> Option<std::fs::File> {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::custom_flags(&mut options, rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    root.open_with(relative, &options).ok().map(cap_std::fs::File::into_std)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,14 +107,7 @@ fn read_reference(root: &cap_std::fs::Dir, canonical_root: &std::path::Path, rel
     let relative_target = target.strip_prefix(canonical_root).ok()?;
 
     // Resolve again beneath the held directory so replacement links cannot escape during open
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.read(true);
-
-    // Refuse special files without waiting for a FIFO writer
-    #[cfg(unix)]
-    cap_std::fs::OpenOptionsExt::custom_flags(&mut options, rustix::fs::OFlags::NONBLOCK.bits() as i32);
-
-    let file = root.open_with(relative_target, &options).ok()?.into_std();
+    let file = open_beneath(root, relative_target)?;
     crate::file_read::read_open_file(file, &target, cap).ok()
 }
 
@@ -188,7 +207,8 @@ mod symlink_tests {
         let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
         let directory = std::env::temp_dir().join(format!("tc-mesh-reference-{nonce:016x}"));
         std::fs::create_dir(&directory)?;
-        Ok(directory)
+        // canonical, as production passes it (the temporary folder may itself be reached through a link)
+        directory.canonicalize()
     }
 
     #[test]

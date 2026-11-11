@@ -46,6 +46,29 @@ impl AuthorizedWorkspace {
         Ok(bytes)
     }
 
+    /// Read one regular file of at most `cap` bytes from `relative`, a path below the folder `dir` of the read root
+    /// (`.` for the root itself): the folder is opened first and the file is resolved beneath it, so a link that leaves
+    /// the folder fails (a mesh's references must stay in the mesh's folder), and no more than `cap` bytes are read.
+    pub fn read_beneath(&self, dir: &str, relative: &str, cap: u64) -> Result<Vec<u8>, AutomationError> {
+        let rel = relative_path(relative)?;
+        let root = self.read.as_ref().ok_or_else(|| denied("read"))?;
+        let folder = if dir == "." { root.try_clone() } else { root.open_dir(relative_path(dir)?) }.map_err(|e| file_error("read", dir, e))?;
+        let file = folder.open(&rel).map_err(|e| file_error("read", relative, e))?;
+        let meta = file.metadata().map_err(|e| file_error("read", relative, e))?;
+        if !meta.is_file() {
+            return Err(bad(format!("not a regular file: `{relative}`")));
+        }
+        if meta.len() > cap {
+            return Err(bad(format!("`{relative}` is {} bytes (limit {cap})", meta.len())));
+        }
+        let mut bytes = Vec::new();
+        file.take(cap.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| file_error("read", relative, e))?;
+        if bytes.len() as u64 > cap {
+            return Err(bad(format!("`{relative}` grew past the limit {cap}")));
+        }
+        Ok(bytes)
+    }
+
     /// Create or replace one file below the write root: a temporary file beside the target,
     /// synced and renamed over it. The parent directory must exist.
     pub fn write(&self, path: &str, bytes: &[u8]) -> Result<(), AutomationError> {

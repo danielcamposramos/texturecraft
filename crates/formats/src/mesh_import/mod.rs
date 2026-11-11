@@ -29,9 +29,9 @@ use texturecraft_geom::{BaseColor, MAX_TRIANGLES, Mesh, SubMesh, UvGBuffer};
 
 use crate::{FormatError, Result};
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use external::read_mesh_file;
 pub use external::{MeshFile, self_contained_mesh};
+#[cfg(not(target_arch = "wasm32"))]
+pub use external::{read_mesh_file, read_mesh_reference, reference_cap};
 
 /// Mesh files larger than this are refused before reading.
 pub const MAX_MESH_FILE_BYTES: u64 = 2 << 30;

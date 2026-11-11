@@ -102,6 +102,8 @@ impl Session {
     /// [`Session::add_smart_material_bytes`] at `place` (shelf drag and drop). MaterialCraft
     /// portable materials and packages become linked fill layers.
     pub fn add_smart_material_bytes_at(&mut self, bytes: &[u8], place: Place) -> Result<LayerId> {
+        // the browser hands over whole files, so `material.load`'s read cap is applied here for every caller
+        check_loadable(bytes.len()).map_err(EngineError::Other)?;
         if texturecraft_formats::mcmat::is_mcmat(bytes) || texturecraft_formats::mcmat::is_mcraft(bytes) {
             return self.add_linked_material_bytes_at(bytes, place);
         }
@@ -155,7 +157,6 @@ fn save(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// A smart material of `len` bytes must be one `material.load` reads back (the mesh importer's file limit).
-#[cfg(not(target_arch = "wasm32"))]
 fn check_loadable(len: usize) -> std::result::Result<(), String> {
     let limit = texturecraft_formats::mesh_import::MAX_MESH_FILE_BYTES;
     if len as u64 > limit { Err(format!("the smart material is {len} bytes, over the {limit} byte limit `material.load` reads")) } else { Ok(()) }
@@ -181,7 +182,7 @@ fn load(_: &mut Session, _: &Value) -> Result<Value> {
     Err(EngineError::Other("file paths are not available in the browser".into()))
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
     use super::check_loadable;
 

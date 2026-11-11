@@ -608,7 +608,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "Dipingi sulla mesh per modificare questa maschera. Usa il valore maschera della scheda Materiale per il grigio.",
     ),
-    ("Paint the path with the brush (Enter)", "Dipingi il tracciato con il pennello (Invio)"),
     ("Paint with the current tool", "Dipingi con lo strumento corrente"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -631,8 +630,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Path", "Tracciato"),
     ("Path trace on the processor instead of the graphics card (slower)", "Esegui il path tracing sul processore anziché sulla scheda grafica (più lento)"),
     (
-        "Path: click adds a point, drag moves it, Enter applies, Esc cancels",
-        "Tracciato: clic aggiunge un punto, trascina lo sposta, Invio applica, Esc annulla",
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "Tracciato: clic aggiunge un punto, clic sulla curva ne inserisce uno, trascina lo sposta, Invio applica, Esc annulla",
     ),
     ("Pattern scale", "Scala motivo"),
     ("Perlin noise", "Rumore Perlin"),
@@ -678,8 +677,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "Rimuovi livello"),
     ("Remove layer(s)", "Rimuovi livello/i"),
     ("Remove mask", "Rimuovi maschera"),
+    ("Remove point", "Rimuovi punto"),
     ("Remove resource", "Rimuovi risorsa"),
-    ("Remove the path (Esc)", "Rimuovi il tracciato (Esc)"),
     ("Remove the shortcut", "Rimuovi la scorciatoia"),
     ("Remove this output", "Rimuovi questo output"),
     ("Remove unused resources...", "Rimuovi risorse inutilizzate..."),
@@ -1164,5 +1163,16 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "The project changed while the dialog was open, so nothing was done",
         "Il progetto è cambiato mentre la finestra di dialogo era aperta, quindi non è stato fatto nulla",
+    ),
+    ("Cores kept for the UI", "Core riservati all'interfaccia"),
+    ("Max RAM while saving", "RAM max durante il salvataggio"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "Il salvataggio usa gli altri core e al massimo questa quota della RAM libera. Almeno un core lavora sempre.",
+    ),
+    ("Max project size on open", "Dimensione massima all’apertura"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "Quantità massima di dati decompressi del progetto. Aumenta questo limite per aprire progetti più grandi.",
     ),
 ];

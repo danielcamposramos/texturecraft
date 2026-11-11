@@ -182,6 +182,15 @@ call("auth", {"token": token})
 print(call("command.run", {"id": "layer.add.fill", "params": {"color": [0.8, 0.1, 0.1]}}))
 ```
 
+The UI's `prefs.project_open_limit_gib` sets the maximum decompressed project data accepted on open
+(default 8 GiB, minimum 1 GiB). Set it with `ui.set {"prefs":{"project_open_limit_gib":16}}`;
+it takes effect before the next control request, without waiting for a frame, and persists with
+the UI preferences. Individual entry limits still apply. This controls opening only, independently
+of `prefs.reserved_cores` and `prefs.save_ram_percent` for saving.
+Settings bounds the reserved-core input to the available logical CPU count and shows the estimated
+save budget in GiB beside the RAM percentage. The readout refreshes once a second from currently
+available RAM; a save calculates its budget when it starts.
+
 ## MCP server
 
 `texturecraft-cli mcp` speaks MCP on stdin/stdout (stdout carries only protocol messages).

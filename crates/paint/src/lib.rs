@@ -26,7 +26,7 @@ pub mod visibility;
 
 pub use brush::{Alignment, BrushAlpha, BrushSettings, FULL_TURN_DEGREES, MAX_RADIAL_COPIES, Particles, Shape, Symmetry, image_alpha};
 pub use commit::{CommitSource, Staging, TexelFn, commit_coverage, commit_layer, commit_mask};
-pub use path::{Lasso, spline};
+pub use path::{Lasso, spline, spline_segments};
 pub use pickup::{Pickup, PickupMode};
 pub use raster::{RasterCtx, StrokeCanvas, UvStamp, fill_coverage, fill_triangles, rasterize, rasterize_uv};
 pub use stamp_source::StampSource;

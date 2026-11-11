@@ -419,7 +419,9 @@ fn escape_cancels_a_path_with_a_hidden_rail_popup() {
         assert!(harness.state().ui.hide_ui);
         assert!(popup_closed(&harness));
         assert_eq!(harness.state().session.tool.path.points.len(), 2);
-        assert_eq!(harness.state().session.tool.path.editing.is_some(), stored_path);
+
+        // Drafts and committed paths both have a live preview target while edited
+        let (effect, index) = harness.state().session.tool.path.editing.unwrap();
         let history = harness.state().session.history_labels();
 
         harness.key_press(egui::Key::Escape);
@@ -428,6 +430,11 @@ fn escape_cancels_a_path_with_a_hidden_rail_popup() {
         assert!(harness.state().session.tool.path.points.is_empty(), "one Escape clears the path despite the hidden popup");
         assert!(harness.state().session.tool.path.editing.is_none());
         assert_eq!(harness.state().session.history_labels(), history);
+        assert_eq!(
+            harness.state().session.paths(effect).and_then(|paths| paths.get(index)).is_some(),
+            stored_path,
+            "Escape removes a draft but keeps a committed path"
+        );
 
         harness.key_press(egui::Key::Tab);
         harness.run_steps(SETTLE_FRAMES);

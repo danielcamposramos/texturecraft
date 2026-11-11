@@ -371,8 +371,7 @@ pub fn shortcuts(app: &mut TextureCraftApp, ctx: &egui::Context) {
             crate::id_color_pick::IdColorPick::end(app);
         } else if app.ui.mode == Mode::Painting && !popup_open && input.consume_key(Modifiers::NONE, Key::Escape) {
             app.session.cancel_stroke();
-            app.session.tool.path.points.clear();
-            app.session.tool.path.editing = None;
+            app.session.cancel_path();
         }
         commands
     });

@@ -34,6 +34,8 @@ pub mod menus;
 pub mod new_project_advanced;
 mod orb_shape;
 pub mod parity;
+mod path_hit;
+mod path_surface_cache;
 mod preview_image;
 mod preview_request;
 mod preview_worker;
@@ -202,6 +204,7 @@ impl TextureCraftApp {
             ui
         });
         let next_autosave = ui.prefs.autosave_minutes as f64 * 60.0;
+        ui.prefs.apply_resource_limits();
 
         let mut app = TextureCraftApp {
             camera_glide: None,
@@ -272,7 +275,9 @@ impl TextureCraftApp {
 
     /// Run an engine command, reporting errors as toasts. Returns the result on success.
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
-        // Going to a saved camera glides there; the control channel and CLI jump straight away.
+        self.ui.prefs.apply_resource_limits();
+
+        // Going to a saved camera glides there; the control channel and CLI jump straight away
         let glide_from = (id.starts_with("camera.select") || id.starts_with("camera.bookmark")).then_some(self.session.camera);
         match texturecraft_engine::execute(&mut self.session, id, &params) {
             Ok(v) => {
@@ -656,6 +661,7 @@ impl eframe::App for TextureCraftApp {
             self.styled = Some(style);
         }
         self.step_camera_glide(ctx);
+        self.ui.prefs.apply_resource_limits();
         control::poll(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
         self.run_file_dialog_answers();
@@ -667,7 +673,7 @@ impl eframe::App for TextureCraftApp {
         self.poll_bake(ctx);
         self.poll_resize(ctx);
         self.poll_link_cooks(ctx);
-        // The library shelf rescans when the window comes back (MaterialCraft may have sent a material).
+        // The library shelf rescans when the window comes back (MaterialCraft may have sent a material)
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         if focused && !self.focused {
             self.library = None;
@@ -690,9 +696,9 @@ impl eframe::App for TextureCraftApp {
         updates_ui::tick(self, ctx);
         self.bindings.sync(&self.ui.keymap, craft_keymap::egui::platform(ctx));
         menus::shortcuts(self, ctx);
-        // A stored path being edited repaints its sublayer as its points, brush or material change.
+        // The Path tool's curve repaints (a preview while placed) as its points, brush or material change
         if let Err(e) = self.session.path_live() {
-            self.session.stop_path_edit();
+            self.session.cancel_path();
             self.toast(e.to_string(), true);
         }
         profile::drive(self, ctx);
@@ -718,7 +724,7 @@ impl eframe::App for TextureCraftApp {
         }
         let hide = self.ui.hide_ui;
         let tk = theme::Tokens::get(&ctx);
-        // The dock keeps the cards' gutter from the bars and rails around it.
+        // The dock keeps the cards' gutter from the bars and rails around it
         let panel_frame = if hide { egui::Frame::NONE.fill(tk.viewport) } else { egui::Frame::NONE.fill(tk.chrome).inner_margin(theme::GUTTER) };
         egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide { viewport::central(self, ui) } else { docking::show(self, ui) });
         windows::show(self, &ctx);

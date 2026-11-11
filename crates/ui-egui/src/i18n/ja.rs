@@ -596,7 +596,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "メッシュにペイントしてこのマスクを編集します。グレーには「マテリアル」タブのマスク値を使用します。",
     ),
-    ("Paint the path with the brush (Enter)", "ブラシでパスをペイント (Enter)"),
     ("Paint with the current tool", "現在のツールでペイント"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -615,7 +614,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "レイヤーを貼り付け"),
     ("Path", "パス"),
     ("Path trace on the processor instead of the graphics card (slower)", "グラフィックカードではなくプロセッサーでパストレース (低速)"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "パス: クリックでポイントを追加、ドラッグで移動、Enterで適用、Escでキャンセル"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "パス: クリックでポイントを追加、カーブをクリックで挿入、ドラッグで移動、Enterで適用、Escでキャンセル",
+    ),
     ("Pattern scale", "パターンのスケール"),
     ("Perlin noise", "パーリンノイズ"),
     ("Pick focus in the viewport", "ビューポートでフォーカスを指定"),
@@ -660,8 +662,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "レイヤーを削除"),
     ("Remove layer(s)", "レイヤーを削除"),
     ("Remove mask", "マスクを削除"),
+    ("Remove point", "ポイントを削除"),
     ("Remove resource", "リソースを削除"),
-    ("Remove the path (Esc)", "パスを削除 (Esc)"),
     ("Remove the shortcut", "ショートカットを削除"),
     ("Remove this output", "この出力を削除"),
     ("Remove unused resources...", "未使用のリソースを削除..."),
@@ -1147,4 +1149,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     ("The file dialog couldn't be shown: {error}", "ファイルダイアログを表示できませんでした: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "ダイアログを開いている間にプロジェクトが変更されたため、何も実行されませんでした"),
+    ("Cores kept for the UI", "UI用に確保するコア数"),
+    ("Max RAM while saving", "保存時のRAM上限"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "保存は残りのコアと、空きRAMのこの割合までを使います。少なくとも1コアは常に動作します。",
+    ),
+    ("Max project size on open", "開くプロジェクトの最大サイズ"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "展開後のプロジェクトデータの上限です。大きなプロジェクトを開くには、この上限を引き上げてください。",
+    ),
 ];

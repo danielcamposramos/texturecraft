@@ -322,25 +322,25 @@ pub fn fill_mode_buttons(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
 /// Path tool options and actions (top bar and properties)
 pub fn path_controls(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
     let button_size = ui.spacing().interact_size.y;
-    let path = &mut app.session.tool.path;
-    if icon_button(ui, ic::POLYGON, tr("Closed path"), path.closed, button_size).clicked() {
-        path.closed = !path.closed;
-    }
-    let fill_tip = if path.closed { tr("Fill the closed path (lasso)") } else { tr("Fill the path (close it first)") };
-    if icon_button(ui, ic::PAINT_BUCKET, fill_tip, path.fill, button_size).clicked() {
-        path.fill = !path.fill;
+    let path = &app.session.tool.path;
+    let (closed, fill) = (path.closed, path.fill);
+    let selected = path.selected.is_some_and(|i| i < path.points.len());
+    let has_points = !path.points.is_empty();
+    if icon_button(ui, ic::POLYGON, tr("Closed path"), closed, button_size).clicked() {
+        app.session.set_path_closed(!closed);
     }
 
-    let has_points = !path.points.is_empty();
-    if ui
-        .add_enabled(has_points, egui::Button::new(format!("{} {}", ic::CHECK, tr("Apply"))))
-        .on_hover_text(tr("Paint the path with the brush (Enter)"))
-        .clicked()
-    {
-        app.run("tool.path", json!({"commit": true}));
+    let fill_tip = if closed { tr("Fill the closed path (lasso)") } else { tr("Fill the path (close it first)") };
+    if icon_button(ui, ic::PAINT_BUCKET, fill_tip, fill, button_size).clicked() {
+        app.session.set_path_fill(!fill);
     }
-    if ui.add_enabled(has_points, egui::Button::new(format!("{} {}", ic::X, tr("Cancel")))).on_hover_text(tr("Remove the path (Esc)")).clicked() {
-        app.run("tool.path", json!({"clear": true}));
+
+    if ui.add_enabled_ui(selected, |ui| icon_button(ui, ic::BACKSPACE, tr("Remove point"), false, button_size)).inner.clicked() {
+        app.session.remove_selected_path_point();
+    }
+
+    if ui.add_enabled_ui(has_points, |ui| icon_button(ui, ic::CHECK, tr("Apply"), false, button_size)).inner.clicked() {
+        app.run("tool.path", json!({"commit": true}));
     }
 }
 

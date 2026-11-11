@@ -236,6 +236,33 @@ fn obj_without_uvs_or_normals_is_completed() {
 }
 
 #[test]
+fn obj_with_some_objects_having_uvs_preserves_uvs_without_full_unwrap() {
+    let obj = "o Body
+v 0 0 0
+v 1 0 0
+v 1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+f 1/1 2/2 3/3
+o Helper
+v 2 0 0
+v 3 0 0
+v 3 1 0
+f 4 5 6
+";
+    let im = import_mesh_bytes("character.obj", obj.as_bytes()).unwrap();
+    assert!(!im.report.uvs_generated);
+    assert_eq!(im.mesh.uvs[0], Vec2::new(0.0, 1.0));
+    assert_eq!(im.mesh.uvs[1], Vec2::new(1.0, 1.0));
+    assert_eq!(im.mesh.uvs[2], Vec2::new(1.0, 0.0));
+    assert_eq!(im.mesh.uvs[3], Vec2::ZERO);
+    assert_eq!(im.mesh.uvs[4], Vec2::ZERO);
+    assert_eq!(im.mesh.uvs[5], Vec2::ZERO);
+    assert!(im.report.warnings.iter().any(|w| w.contains("some objects have no UVs")));
+}
+
+#[test]
 fn polygons_keep_their_edges_for_the_wireframe() {
     // An OBJ quad and pentagon (with UVs, so no unwrap splits them), a triangle, and a PLY quad.
     let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 2 0 0\nv 3 0 0\nv 3 1 0\nv 2.5 2 0\nv 2 1 0\nvt 0 0\n\

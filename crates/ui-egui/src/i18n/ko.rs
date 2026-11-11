@@ -587,7 +587,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "메시에 칠하여 이 마스크를 편집합니다. 회색은 머티리얼 탭의 마스크 값을 사용하세요.",
     ),
-    ("Paint the path with the brush (Enter)", "브러시로 패스를 칠합니다 (Enter)"),
     ("Paint with the current tool", "현재 도구로 페인팅"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -606,7 +605,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "레이어 붙여넣기"),
     ("Path", "패스"),
     ("Path trace on the processor instead of the graphics card (slower)", "그래픽 카드 대신 프로세서에서 패스 트레이싱합니다 (더 느림)"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "패스: 클릭으로 점 추가, 드래그로 이동, Enter로 적용, Esc로 취소"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "패스: 클릭으로 점 추가, 곡선 클릭으로 점 삽입, 드래그로 이동, Enter로 적용, Esc로 취소",
+    ),
     ("Pattern scale", "패턴 스케일"),
     ("Perlin noise", "펄린 노이즈"),
     ("Pick focus in the viewport", "뷰포트에서 초점 선택"),
@@ -651,8 +653,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "레이어 제거"),
     ("Remove layer(s)", "레이어 제거"),
     ("Remove mask", "마스크 제거"),
+    ("Remove point", "점 제거"),
     ("Remove resource", "리소스 제거"),
-    ("Remove the path (Esc)", "패스를 제거합니다 (Esc)"),
     ("Remove the shortcut", "단축키를 제거합니다"),
     ("Remove this output", "이 출력을 제거합니다"),
     ("Remove unused resources...", "사용하지 않는 리소스 제거..."),
@@ -1132,4 +1134,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "\"{layer}\"은(는) 채울 수 없습니다: 페인트 레이어나 레이어 마스크를 선택하세요"),
     ("The file dialog couldn't be shown: {error}", "파일 대화 상자를 표시할 수 없습니다: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "대화 상자가 열려 있는 동안 프로젝트가 변경되어 아무 작업도 수행하지 않았습니다"),
+    ("Cores kept for the UI", "UI용으로 남겨 둘 코어"),
+    ("Max RAM while saving", "저장 시 최대 RAM"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "저장은 나머지 코어와 여유 RAM의 이 비율까지만 사용합니다. 최소 한 개의 코어는 항상 작동합니다.",
+    ),
+    ("Max project size on open", "열기 시 최대 프로젝트 크기"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "압축 해제된 프로젝트 데이터의 최대 크기입니다. 더 큰 프로젝트를 열려면 이 한도를 높이세요.",
+    ),
 ];

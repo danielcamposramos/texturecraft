@@ -599,7 +599,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "Pinte na malha para editar esta máscara. Use o valor de máscara da aba Material para cinza.",
     ),
-    ("Paint the path with the brush (Enter)", "Pintar o caminho com o pincel (Enter)"),
     ("Paint with the current tool", "Pintar com a ferramenta atual"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -621,7 +620,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "Colar camada(s)"),
     ("Path", "Caminho"),
     ("Path trace on the processor instead of the graphics card (slower)", "Fazer path tracing no processador em vez da placa de vídeo (mais lento)"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "Caminho: clicar adiciona um ponto, arrastar o move, Enter aplica, Esc cancela"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "Caminho: clicar adiciona um ponto, clicar na curva insere um, arrastar o move, Enter aplica, Esc cancela",
+    ),
     ("Pattern scale", "Escala do padrão"),
     ("Perlin noise", "Ruído Perlin"),
     ("Pick focus in the viewport", "Escolher o foco na viewport"),
@@ -666,8 +668,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "Remover camada"),
     ("Remove layer(s)", "Remover camada(s)"),
     ("Remove mask", "Remover máscara"),
+    ("Remove point", "Remover ponto"),
     ("Remove resource", "Remover recurso"),
-    ("Remove the path (Esc)", "Remover o caminho (Esc)"),
     ("Remove the shortcut", "Remover o atalho"),
     ("Remove this output", "Remover esta saída"),
     ("Remove unused resources...", "Remover recursos não usados..."),
@@ -1150,4 +1152,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ),
     ("The file dialog couldn't be shown: {error}", "Não foi possível mostrar a caixa de diálogo de arquivos: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "O projeto mudou enquanto a caixa de diálogo estava aberta, então nada foi feito"),
+    ("Cores kept for the UI", "Núcleos reservados para a interface"),
+    ("Max RAM while saving", "RAM máx. ao salvar"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "Salvar usa os outros núcleos e no máximo esta parte da RAM livre. Pelo menos um núcleo sempre trabalha.",
+    ),
+    ("Max project size on open", "Tamanho máximo ao abrir"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "Limite de dados descompactados do projeto. Aumente este limite para abrir projetos maiores.",
+    ),
 ];

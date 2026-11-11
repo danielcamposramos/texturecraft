@@ -118,6 +118,13 @@ pub struct Prefs {
     /// Where autosaves, smart materials, presets, templates and layouts go (desktop; read at
     /// startup). Empty or relative: `Documents/TextureCraft`.
     pub data_folder: String,
+    /// Cores a project save leaves to the UI; Settings bounds this to the available logical CPUs
+    /// (desktop). At least one save worker always runs.
+    pub reserved_cores: u32,
+    /// Maximum decompressed project size accepted on open, in GiB (at least one).
+    pub project_open_limit_gib: u32,
+    /// Percent of the free RAM a project save may hold at once (desktop; 1 to 100).
+    pub save_ram_percent: u8,
 }
 
 impl Default for Prefs {
@@ -132,7 +139,19 @@ impl Default for Prefs {
             system_title_bar: false,
             start_window: true,
             data_folder: String::new(),
+            reserved_cores: 1,
+            project_open_limit_gib: texturecraft_engine::formats::DEFAULT_PROJECT_OPEN_LIMIT_GIB,
+            save_ram_percent: 50,
         }
+    }
+}
+
+impl Prefs {
+    /// Apply resource preferences before commands or file workers can start.
+    pub fn apply_resource_limits(&self) {
+        texturecraft_engine::formats::set_project_open_limit_gib(self.project_open_limit_gib);
+        #[cfg(not(target_arch = "wasm32"))]
+        texturecraft_engine::formats::set_save_resources(self.reserved_cores as usize, self.save_ram_percent);
     }
 }
 

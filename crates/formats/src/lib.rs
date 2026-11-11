@@ -47,14 +47,19 @@ pub use mesh_import::{HighPolyMesh, ImportedMesh, MeshFile, MeshReport, import_h
 #[cfg(not(target_arch = "wasm32"))]
 pub use presets::load_preset;
 pub use presets::{builtin_preset, builtin_presets, preset_from_json, preset_to_json};
-pub use project_file::{BakePaintData, ProjectFile, load_project_bytes, sanitize_resource_name, save_project_bytes};
+pub use project_file::{
+    BakePaintData, DEFAULT_PROJECT_OPEN_LIMIT_GIB, ProjectFile, load_project_bytes, project_open_limit_gib, sanitize_resource_name, save_project_bytes,
+    set_project_open_limit_gib,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use export::write_files;
 #[cfg(not(target_arch = "wasm32"))]
 pub use mesh_import::{import_mesh, read_mesh_file};
 #[cfg(not(target_arch = "wasm32"))]
-pub use project_file::{load_project, save_project};
+pub use project_file::{
+    DEFAULT_RAM_PERCENT, DEFAULT_RESERVED_CORES, available_save_resources, load_project, save_project, save_ram_budget, set_save_resources,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {

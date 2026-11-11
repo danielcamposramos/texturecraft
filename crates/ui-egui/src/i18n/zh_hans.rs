@@ -545,7 +545,6 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paint chips", "掉漆"),
     ("Paint on the mesh to edit the layer content.", "在网格上绘画以编辑图层内容。"),
     ("Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.", "在网格上绘画以编辑此遮罩。灰度请使用“材质”选项卡中的遮罩值。"),
-    ("Paint the path with the brush (Enter)", "用笔刷绘制路径（Enter）"),
     ("Paint with the current tool", "使用当前工具绘画"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -564,7 +563,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "粘贴图层"),
     ("Path", "路径"),
     ("Path trace on the processor instead of the graphics card (slower)", "在处理器而非显卡上进行路径追踪（较慢）"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "路径：单击添加点，拖动移动点，Enter 应用，Esc 取消"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "路径：单击添加点，单击曲线插入点，拖动移动点，Enter 应用，Esc 取消",
+    ),
     ("Pattern scale", "图案缩放"),
     ("Perlin noise", "柏林噪波"),
     ("Pick focus in the viewport", "在视口中拾取焦点"),
@@ -609,8 +611,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "移除图层"),
     ("Remove layer(s)", "移除图层"),
     ("Remove mask", "移除遮罩"),
+    ("Remove point", "移除点"),
     ("Remove resource", "移除资源"),
-    ("Remove the path (Esc)", "移除路径（Esc）"),
     ("Remove the shortcut", "移除快捷键"),
     ("Remove this output", "移除此输出"),
     ("Remove unused resources...", "移除未使用的资源..."),
@@ -1078,4 +1080,12 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "“{layer}”无法填充：请选择绘画图层或图层遮罩"),
     ("The file dialog couldn't be shown: {error}", "无法显示文件对话框：{error}"),
     ("The project changed while the dialog was open, so nothing was done", "对话框打开期间项目已更改，因此未执行任何操作"),
+    ("Cores kept for the UI", "为界面保留的核心数"),
+    ("Max RAM while saving", "保存时的最大内存"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "保存使用其余核心,并最多占用这一比例的可用内存。至少始终有一个核心工作。",
+    ),
+    ("Max project size on open", "打开项目的大小上限"),
+    ("Maximum decompressed project data. Increase this limit to open larger projects.", "解压后项目数据的大小上限。提高此限制以打开更大的项目。"),
 ];

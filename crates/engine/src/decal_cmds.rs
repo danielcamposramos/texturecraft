@@ -126,7 +126,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
 
     // A decal dropped on another texture set goes there and selects it, as a dropped material does
     if ts != s.ts() {
-        crate::set_cmds::select_set(s, ts);
+        crate::set_cmds::select_set(s, ts)?;
     }
 
     let base = strp(p, "name")

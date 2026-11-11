@@ -79,16 +79,23 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|index| index as usize)
         .filter(|index| *index < s.set_count())
         .ok_or_else(|| bad("textureSet.select", "valid `ts` index required"))?;
-    select_set(s, ts);
+    select_set(s, ts)?;
     Ok(json!({ "ts": ts }))
 }
 
 /// Make texture set `ts` the active one, on its content stack
-pub(crate) fn select_set(s: &mut Session, ts: usize) {
+pub(crate) fn select_set(s: &mut Session, ts: usize) -> Result<()> {
     s.cancel_stroke();
+
+    // Paths paint into the active set
+    if ts != s.ts() {
+        s.finish_path()?;
+    }
+
     s.active_set = ts;
     s.target = StackTarget::Content;
     s.revision = s.revision.wrapping_add(1);
+    Ok(())
 }
 
 fn resolution(s: &mut Session, p: &Value) -> Result<Value> {

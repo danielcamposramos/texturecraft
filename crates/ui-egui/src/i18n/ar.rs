@@ -578,7 +578,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "ارسم على المجسم لتعديل هذا القناع. استخدم قيمة القناع في لسان تبويب المادة للتدرج الرمادي.",
     ),
-    ("Paint the path with the brush (Enter)", "رسم المسار بالفرشاة (Enter)"),
     ("Paint with the current tool", "الرسم بالأداة الحالية"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -597,7 +596,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "لصق الطبقة (الطبقات)"),
     ("Path", "مسار"),
     ("Path trace on the processor instead of the graphics card (slower)", "تتبع المسار على المعالج بدلاً من بطاقة الرسوميات (أبطأ)"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "المسار: النقر يضيف نقطة، والسحب يحركها، وEnter يطبق، وEsc يلغي"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "المسار: النقر يضيف نقطة، والنقر على المنحنى يُدرج نقطة، والسحب يحركها، وEnter يطبق، وEsc يلغي",
+    ),
     ("Pattern scale", "مقياس النمط"),
     ("Perlin noise", "ضوضاء بيرلن (Perlin)"),
     ("Pick focus in the viewport", "اختر نقطة التركيز في منفذ العرض"),
@@ -642,8 +644,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "إزالة الطبقة"),
     ("Remove layer(s)", "إزالة الطبقة (الطبقات)"),
     ("Remove mask", "إزالة القناع"),
+    ("Remove point", "إزالة النقطة"),
     ("Remove resource", "إزالة المورد"),
-    ("Remove the path (Esc)", "إزالة المسار (Esc)"),
     ("Remove the shortcut", "إزالة الاختصار"),
     ("Remove this output", "إزالة هذا المخرج"),
     ("Remove unused resources...", "إزالة الموارد غير المستخدمة..."),
@@ -1119,4 +1121,15 @@ pub const TABLE: &[(&str, &str)] = &[
     ("\"{layer}\" can't be filled: select a paint layer or a layer's mask", "\"{layer}\" لا يمكن تعبئتها: حدد طبقة رسم أو قناع طبقة"),
     ("The file dialog couldn't be shown: {error}", "تعذر عرض نافذة الملفات: {error}"),
     ("The project changed while the dialog was open, so nothing was done", "تغيّر المشروع أثناء فتح النافذة، لذا لم يُنفَّذ أي إجراء"),
+    ("Cores kept for the UI", "أنوية محجوزة للواجهة"),
+    ("Max RAM while saving", "أقصى ذاكرة عند الحفظ"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "يستخدم الحفظ الأنوية الأخرى وحدًا أقصى بهذه النسبة من الذاكرة الحرة. يعمل نواة واحدة على الأقل دائمًا.",
+    ),
+    ("Max project size on open", "الحد الأقصى لحجم المشروع عند الفتح"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "الحد الأقصى لبيانات المشروع بعد فك الضغط. ارفع هذا الحد لفتح مشاريع أكبر.",
+    ),
 ];

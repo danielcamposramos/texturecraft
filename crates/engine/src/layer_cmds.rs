@@ -168,6 +168,12 @@ fn group(s: &mut Session, p: &Value) -> Result<Value> {
 fn select(s: &mut Session, p: &Value) -> Result<Value> {
     let id = layer_param(s, "layer.select", p)?;
     let (ts, _, _) = s.doc.project.locate(id).ok_or_else(|| bad("layer.select", "layer not in a stack"))?;
+
+    // Paths paint into the active set
+    if ts != s.ts() {
+        s.finish_path()?;
+    }
+
     s.active_set = ts;
     s.selected.insert(ts, id);
     s.target = match p.get("target") {
@@ -184,6 +190,7 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
         },
         None => StackTarget::Content,
     };
+
     s.revision = s.revision.wrapping_add(1);
     Ok(json!({ "layer": id.0, "textureSet": ts }))
 }

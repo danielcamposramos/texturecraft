@@ -617,7 +617,6 @@ pub const TABLE: &[(&str, &str)] = &[
         "Paint on the mesh to edit this mask. Use the Material tab's mask value for gray.",
         "Peignez sur le maillage pour modifier ce masque. Utilisez la valeur de masque de l'onglet Matériau pour le gris.",
     ),
-    ("Paint the path with the brush (Enter)", "Peindre le tracé avec le pinceau (Enter)"),
     ("Paint with the current tool", "Peindre avec l'outil actuel"),
     (
         "Painted layer pixels {pixels} MB, composited channels {composites} MB, compositing cache {cache} MB",
@@ -639,7 +638,10 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Paste layer(s)", "Coller le(s) calque(s)"),
     ("Path", "Tracé"),
     ("Path trace on the processor instead of the graphics card (slower)", "Tracé de chemins sur le processeur au lieu de la carte graphique (plus lent)"),
-    ("Path: click adds a point, drag moves it, Enter applies, Esc cancels", "Tracé : cliquer ajoute un point, glisser le déplace, Enter applique, Esc annule"),
+    (
+        "Path: click adds a point, click the curve inserts one, drag moves it, Enter applies, Esc cancels",
+        "Tracé : cliquer ajoute un point, cliquer sur la courbe en insère un, glisser le déplace, Enter applique, Esc annule",
+    ),
     ("Pattern scale", "Échelle du motif"),
     ("Perlin noise", "Bruit de Perlin"),
     ("Pick focus in the viewport", "Choisir la mise au point dans la fenêtre d'affichage"),
@@ -684,8 +686,8 @@ pub const TABLE: &[(&str, &str)] = &[
     ("Remove layer", "Supprimer le calque"),
     ("Remove layer(s)", "Supprimer le(s) calque(s)"),
     ("Remove mask", "Supprimer le masque"),
+    ("Remove point", "Retirer le point"),
     ("Remove resource", "Supprimer la ressource"),
-    ("Remove the path (Esc)", "Supprimer le tracé (Esc)"),
     ("Remove the shortcut", "Supprimer le raccourci"),
     ("Remove this output", "Supprimer cette sortie"),
     ("Remove unused resources...", "Supprimer les ressources inutilisées..."),
@@ -1179,5 +1181,16 @@ pub const TABLE: &[(&str, &str)] = &[
     (
         "The project changed while the dialog was open, so nothing was done",
         "Le projet a changé pendant que la boîte de dialogue était ouverte ; rien n'a été fait",
+    ),
+    ("Cores kept for the UI", "Cœurs réservés à l'interface"),
+    ("Max RAM while saving", "RAM max. à l'enregistrement"),
+    (
+        "Saving uses the other cores and at most this share of the free RAM. At least one core always works.",
+        "L'enregistrement utilise les autres cœurs et au plus cette part de la RAM libre. Au moins un cœur travaille toujours.",
+    ),
+    ("Max project size on open", "Taille max. à l’ouverture"),
+    (
+        "Maximum decompressed project data. Increase this limit to open larger projects.",
+        "Volume maximal des données décompressées du projet. Augmentez cette limite pour ouvrir des projets plus volumineux.",
     ),
 ];

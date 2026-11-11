@@ -55,4 +55,6 @@ web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "H
 eframe = { workspace = true, features = ["x11"] }
 # Offscreen pictures of the whole window (tests/ui_snapshots.rs).
 egui_kittest = { version = "0.37", features = ["wgpu", "eframe"] }
+# Fallible setup of the exact GPU device used by rendering regression tests.
+pollster = "0.4"
 image = { workspace = true }

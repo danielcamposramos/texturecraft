@@ -78,10 +78,10 @@ fn dragging_a_generator_slider_applies_live_as_one_undo_step() {
     assert_eq!(h.state().session.history_labels().len(), steps + 1, "one undo step for the drag");
 }
 
-/// The combo box in the row of the "Channel" label.
+/// The combo box in the row of the levels editor's Reset button.
 fn channel_picker<'a>(h: &'a Harness<'_, TextureCraftApp>) -> egui_kittest::Node<'a> {
-    let row = h.get_by_label("Channel").rect().center().y;
-    h.get_all(by().role(Role::ComboBox)).find(|n| (n.rect().center().y - row).abs() < 4.0).unwrap()
+    let row = h.get_by_label("Reset").rect().center().y;
+    h.get_all(by().role(Role::ComboBox)).find(|node| (node.rect().center().y - row).abs() < 4.0).unwrap()
 }
 
 /// A content levels effect offers a channel for its histogram; picking one keeps it selected.

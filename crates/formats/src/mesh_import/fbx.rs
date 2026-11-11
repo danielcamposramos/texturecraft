@@ -460,38 +460,59 @@ pub(crate) fn read(bytes: &[u8]) -> Result<RawMesh> {
 /// `found` has, under their paths below its folder; None when it found none (or `bytes` is a
 /// package already). Also the texture paths it could not find.
 pub(crate) fn package(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<(Option<Vec<u8>>, Vec<String>)> {
+    package_with_limit(file_name, bytes, found, MAX_MESH_FILE_BYTES)
+}
+
+pub(super) fn package_with_limit(
+    file_name: &str,
+    bytes: &[u8],
+    found: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    max_bytes: u64,
+) -> Result<(Option<Vec<u8>>, Vec<String>)> {
     if bytes.starts_with(ZIP_MAGIC) {
         return Ok((None, Vec::new()));
     }
+
     crate::guard(KIND, || {
         let (mut files, mut missing): (Vec<(String, Vec<u8>)>, Vec<String>) = (Vec::new(), Vec::new());
         let mut total = bytes.len() as u64;
         read_inner(bytes, &mut |paths| {
+            // Once over budget, later materials must not trigger more file reads or clones
+            if total > max_bytes {
+                return None;
+            }
+
             if let Some((_, data)) = files.iter().find(|(n, _)| paths.iter().any(|p| below(p).as_ref() == Some(n))) {
                 return Some(data.clone());
             }
-            for p in paths {
-                if let (Some(name), Some(data)) = (below(p), found(p).filter(|d| d.len() as u64 <= MAX_TEXTURE_BYTES)) {
+
+            for path in paths {
+                let Some(name) = below(path) else { continue };
+                if let Some(data) = found(path).filter(|data| data.len() as u64 <= MAX_TEXTURE_BYTES) {
                     total = total.saturating_add(data.len() as u64);
-                    if total > MAX_MESH_FILE_BYTES {
-                        return None; // over budget: stop collecting; reported below
+                    if total > max_bytes {
+                        return None;
                     }
+
                     files.push((name, data.clone()));
                     return Some(data);
                 }
             }
-            // A texture is missing when none of its paths was found; named by its first.
+
+            // A texture is missing when none of its paths was found; named by its first
             if let Some(first) = paths.first().filter(|f| !missing.iter().any(|m| m == *f)) {
                 missing.push(first.to_string());
             }
             None
         })?;
-        if files.is_empty() && total <= MAX_MESH_FILE_BYTES {
-            return Ok((None, missing));
-        }
-        if total > MAX_MESH_FILE_BYTES {
+        if total > max_bytes {
             return Err(FormatError::TooLarge("the FBX and its textures exceed 2 GiB".into()));
         }
+
+        if files.is_empty() {
+            return Ok((None, missing));
+        }
+
         let leaf = std::path::Path::new(file_name).file_name().and_then(|n| n.to_str()).unwrap_or("mesh.fbx");
         Ok((Some(crate::mesh_export::usd::usdz(leaf, bytes, &files)?), missing))
     })

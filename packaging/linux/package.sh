@@ -21,7 +21,7 @@ APP_ID=ai.storyteller.texturecraft
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --formats) FORMATS="$2"; shift 2 ;;
@@ -42,7 +42,7 @@ BASENAME="texturecraft-$VERSION-linux-$ARCH"
 
 echo "==> TextureCraft $VERSION for Linux $ARCH ($FORMATS)"
 
-if [ "$SKIP_BUILD" = 0 ]; then
+if [[ "$SKIP_BUILD" = 0 ]]; then
   (cd "$ROOT" && cargo build --release --locked -p texturecraft -p texturecraft-cli ${CROSS_TARGET:+--target "$CROSS_TARGET"})
 fi
 BIN="$CARGO_TARGET_DIR/${CROSS_TARGET:+$CROSS_TARGET/}release"
@@ -89,7 +89,7 @@ if has deb || has rpm; then
   # nfpm expands env vars in fields like `version` and `arch`, but not in `contents[].src`.
   sed "s|\${STAGE}|$STAGE|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
   # The riscv64 cross sysroot is Ubuntu 24.04, whose glibc floor is 2.39.
-  if [ "$ARCH" = riscv64 ]; then sed -i "s/libc6 (>= 2.35)/libc6 (>= 2.39)/" "$WORK/nfpm.yaml"; fi
+  if [[ "$ARCH" = riscv64 ]]; then sed -i "s/libc6 (>= 2.35)/libc6 (>= 2.39)/" "$WORK/nfpm.yaml"; fi
   for fmt in deb rpm; do
     if has "$fmt"; then (cd "$ROOT" && nfpm package -f "$WORK/nfpm.yaml" -p "$fmt" -t "$DIST/$BASENAME.$fmt"); fi
   done
@@ -110,9 +110,9 @@ if has appimage; then
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
 
   TOOL="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
-  if [ -z "$TOOL" ]; then
+  if [[ -z "$TOOL" ]]; then
     TOOL="$CARGO_TARGET_DIR/appimagetool-$ARCH.AppImage"
-    if [ ! -x "$TOOL" ]; then
+    if [[ ! -x "$TOOL" ]]; then
       curl --proto '=https' -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
       chmod +x "$TOOL"
     fi
@@ -135,15 +135,15 @@ if has appimage; then
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
   (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
   echo "wrote $OUT"
-  if [ -s "$OUT.zsync" ]; then
+  if [[ -s "$OUT.zsync" ]]; then
     echo "wrote $OUT.zsync"
   else
     warn "zsyncmake not found, so $OUT.zsync was not written; AppImage delta updates need it"
   fi
 fi
 
-if [ -n "${CROSS_TARGET:-}" ]; then
-  if [ -n "${EMULATOR:-}" ]; then "$EMULATOR" "$STAGE/usr/bin/texturecraft-cli" --version; fi
+if [[ -n "${CROSS_TARGET:-}" ]]; then
+  if [[ -n "${EMULATOR:-}" ]]; then "$EMULATOR" "$STAGE/usr/bin/texturecraft-cli" --version; fi
 else
   "$STAGE/usr/bin/texturecraft-cli" --version
 fi

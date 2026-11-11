@@ -17,15 +17,20 @@ pub struct SetHighlight {
 impl SetHighlight {
     /// The scene color the lines are drawn with so that exposure `exposure_ev` and the tone curve (ACES when `aces`) show them in [`Self::color`]
     pub fn scene_color(&self, exposure_ev: f32, aces: bool) -> [f32; 3] {
-        let exposure = 2f32.powf(exposure_ev).max(f32::MIN_POSITIVE);
-
-        self.color.map(|screen| {
-            let screen = screen.max(0.0);
-            let exposed = if aces { inverse_aces(screen.min(MAX_ACES_SCREEN_VALUE)) } else { screen };
-
-            exposed / exposure
-        })
+        scene_color_showing(self.color, exposure_ev, aces)
     }
+}
+
+/// The scene color that exposure `exposure_ev` and the tone curve (ACES when `aces`) show as `screen` (linear RGB)
+pub(crate) fn scene_color_showing(screen: [f32; 3], exposure_ev: f32, aces: bool) -> [f32; 3] {
+    let exposure = 2f32.powf(exposure_ev).max(f32::MIN_POSITIVE);
+
+    screen.map(|screen| {
+        let screen = screen.max(0.0);
+        let exposed = if aces { inverse_aces(screen.min(MAX_ACES_SCREEN_VALUE)) } else { screen };
+
+        exposed / exposure
+    })
 }
 
 /// The input of post.wgsl's `aces` that gives `screen`: the positive root of its rational curve solved for the input

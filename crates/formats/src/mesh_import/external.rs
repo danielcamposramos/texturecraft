@@ -56,19 +56,40 @@ pub fn self_contained_mesh(name: &str, bytes: Vec<u8>, read: &mut dyn FnMut(&str
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_mesh_file(path: &std::path::Path) -> Result<MeshFile> {
     let bytes = crate::read_capped(path, MAX_MESH_FILE_BYTES)?;
-    let dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
-    // Canonicalize so a symlink inside the folder cannot lead outside it. FBX and USD only
-    // reference textures (capped on use, so cap the read too); glTF buffers may be large.
+    let directory = mesh_directory(path);
+
+    // FBX and USD reference textures; glTF also references larger geometry buffers
     let cap = if matches!(super::extension(&path.to_string_lossy()).as_str(), "fbx" | "usd" | "usda" | "usdc") {
         super::MAX_TEXTURE_BYTES
     } else {
         MAX_MESH_FILE_BYTES
     };
-    let root = dir.canonicalize().ok();
-    self_contained_mesh(&path.to_string_lossy(), bytes, &mut |rel| {
-        let full = dir.join(rel).canonicalize().ok()?;
-        full.starts_with(root.as_ref()?).then(|| crate::read_capped(&full, cap).ok()).flatten()
-    })
+    let root = cap_std::fs::Dir::open_ambient_dir(directory, cap_std::ambient_authority()).ok();
+    let canonical_root = directory.canonicalize().ok();
+    self_contained_mesh(&path.to_string_lossy(), bytes, &mut |relative| read_reference(root.as_ref()?, canonical_root.as_deref()?, relative, cap))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mesh_directory(path: &std::path::Path) -> &std::path::Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_reference(root: &cap_std::fs::Dir, canonical_root: &std::path::Path, relative: &str, cap: u64) -> Option<Vec<u8>> {
+    // Canonicalization preserves absolute symlinks whose targets are inside the mesh folder
+    let target = canonical_root.join(relative).canonicalize().ok()?;
+    let relative_target = target.strip_prefix(canonical_root).ok()?;
+
+    // Resolve again beneath the held directory so replacement links cannot escape during open
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+
+    // Refuse special files without waiting for a FIFO writer
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::custom_flags(&mut options, rustix::fs::OFlags::NONBLOCK.bits() as i32);
+
+    let file = root.open_with(relative_target, &options).ok()?.into_std();
+    crate::file_read::read_open_file(file, &target, cap).ok()
 }
 
 /// `asset` as a path below the mesh's folder (`/`-separated, `.` and `..` resolved), or None when
@@ -159,9 +180,20 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod symlink_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn test_directory() -> std::io::Result<PathBuf> {
+        use std::hash::{BuildHasher, Hasher};
+        let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let directory = std::env::temp_dir().join(format!("tc-mesh-reference-{nonce:016x}"));
+        std::fs::create_dir(&directory)?;
+        Ok(directory)
+    }
+
     #[test]
     fn a_symlink_out_of_the_mesh_folder_is_not_read() {
-        let base = std::env::temp_dir().join(format!("tc-symlink-{}", std::process::id()));
+        let base = test_directory().unwrap();
         let (mesh_dir, outside) = (base.join("mesh"), base.join("outside"));
         std::fs::create_dir_all(&mesh_dir).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -169,8 +201,71 @@ mod symlink_tests {
         std::os::unix::fs::symlink(&outside, mesh_dir.join("tex")).unwrap();
         let gltf = br#"{"asset":{"version":"2.0"},"images":[{"uri":"tex/secret.png"}]}"#;
         std::fs::write(mesh_dir.join("m.gltf"), gltf).unwrap();
+
         let file = super::read_mesh_file(&mesh_dir.join("m.gltf")).unwrap();
-        let _ = std::fs::remove_dir_all(&base);
+
         assert!(!String::from_utf8_lossy(&file.bytes).contains("c2VjcmV0"), "symlinked file was embedded");
+        assert_eq!(file.warnings.len(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn references_support_in_folder_symlinks_and_enforce_the_cap() {
+        let directory = test_directory().unwrap();
+        std::fs::write(directory.join("texture"), b"pixels").unwrap();
+        std::os::unix::fs::symlink("texture", directory.join("relative")).unwrap();
+        std::os::unix::fs::symlink(directory.join("texture"), directory.join("absolute")).unwrap();
+        let root = cap_std::fs::Dir::open_ambient_dir(&directory, cap_std::ambient_authority()).unwrap();
+
+        for name in ["texture", "relative", "absolute"] {
+            assert_eq!(read_reference(&root, &directory, name, 6), Some(b"pixels".to_vec()));
+            assert_eq!(read_reference(&root, &directory, name, 5), None);
+        }
+
+        assert_eq!(read_reference(&root, &directory, "missing", 6), None);
+        assert_eq!(read_reference(&root, &directory, ".", 6), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn replacing_the_root_path_cannot_redirect_an_open_directory() {
+        let directory = test_directory().unwrap();
+        let original = directory.join("mesh");
+        let moved = directory.join("moved");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("texture"), b"inside").unwrap();
+        let root = cap_std::fs::Dir::open_ambient_dir(&original, cap_std::ambient_authority()).unwrap();
+
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("texture"), b"outside").unwrap();
+        let bytes = read_reference(&root, &original, "texture", 16);
+
+        assert_eq!(bytes, Some(b"inside".to_vec()));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bare_mesh_filename_keeps_neighboring_references() {
+        const CHILD: &str = "TC_TEST_BARE_MESH_PATH";
+        if std::env::var_os(CHILD).is_some() {
+            let file = read_mesh_file(Path::new("mesh.gltf")).unwrap();
+            assert!(String::from_utf8_lossy(&file.bytes).contains("cGl4ZWxz"));
+            assert!(file.warnings.is_empty());
+            return;
+        }
+
+        let directory = test_directory().unwrap();
+        std::fs::write(directory.join("mesh.gltf"), br#"{"asset":{"version":"2.0"},"images":[{"uri":"texture"}]}"#).unwrap();
+        std::fs::write(directory.join("texture"), b"pixels").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "mesh_import::external::symlink_tests::bare_mesh_filename_keeps_neighboring_references"])
+            .env(CHILD, "1")
+            .current_dir(&directory)
+            .status()
+            .unwrap();
+
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(status.success());
     }
 }

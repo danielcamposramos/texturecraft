@@ -2,7 +2,7 @@
 //! masks, filters, alphas, procedurals, environments, textures), all built in and procedural.
 //! Search filters across every tab. Materials (built in and saved), smart masks, filters, alphas
 //! and textures drag onto the layer stack, a layer row, the viewport or the brush properties
-//! ([`ShelfDrag`]); a texture dropped on the 3D view becomes a decal there.
+//! ([`ShelfDrag`]); a texture dropped on the 3D view becomes a decal there, in the channel picked from a menu
 
 use egui::{Color32, RichText, Sense, Stroke, Ui, vec2};
 use egui_phosphor::regular as ic;
@@ -20,6 +20,7 @@ use texturecraft_engine::smart_masks::SMART_MASKS;
 use texturecraft_render::ibl::ENVIRONMENTS;
 
 use crate::TextureCraftApp;
+use crate::decal_drop::DecalDrop;
 use crate::i18n::{tr, trf};
 use crate::shelf_preview::ShelfPreview;
 use crate::theme::Tokens;
@@ -89,6 +90,11 @@ impl Asset {
     pub fn is_material(&self) -> bool {
         matches!(self, Asset::Material(_) | Asset::Library(_))
     }
+
+    /// Assets a 3D view drop puts on the texture set under the pointer
+    pub fn goes_onto_set(&self) -> bool {
+        self.is_material() || matches!(self, Asset::Texture(_))
+    }
 }
 
 /// The drag-and-drop payload of a shelf tile.
@@ -144,17 +150,17 @@ pub enum DropZone {
     Brush,
     /// The 2D view: alphas and materials.
     View2d,
-    /// The 3D view: alphas, materials (on the texture set they drop on) and textures (placed as decals where they drop).
+    /// The 3D view: alphas, materials (on the texture set they drop on) and textures (decals where they drop, on that set)
     View3d,
 }
 
-/// The texture set under the pointer while a shelf material is dragged over the 3D view `response`: the set a drop there applies it to
-pub fn material_drop_set(app: &TextureCraftApp, ui: &Ui, response: &egui::Response) -> Option<usize> {
+/// The texture set under the pointer while a shelf material or image is dragged over the 3D view `response`: the set a drop there goes to
+pub fn drop_set(app: &TextureCraftApp, ui: &Ui, response: &egui::Response) -> Option<usize> {
     if app.ui.mode != crate::state::Mode::Painting {
         return None;
     }
 
-    response.dnd_hover_payload::<ShelfDrag>().filter(|drag| drag.asset.is_material())?;
+    response.dnd_hover_payload::<ShelfDrag>().filter(|drag| drag.asset.goes_onto_set())?;
     set_under_pointer(app, ui, response)
 }
 
@@ -164,10 +170,14 @@ fn set_under_pointer(app: &TextureCraftApp, ui: &Ui, response: &egui::Response) 
     app.session.texture_set_at(Vec2::new(local_position.x, local_position.y), app.session.viewport)
 }
 
-/// Highlight accepted shelf assets on hover and apply them on drop. In the 3D view a material goes to the texture set under the pointer, highlighted by the view itself ([`material_drop_set`])
+/// Highlight accepted shelf assets on hover and apply them on drop. In the 3D view a material or image goes to the texture set under the pointer, highlighted by the view itself ([`drop_set`])
 pub fn drop_target(app: &mut TextureCraftApp, ui: &Ui, response: &egui::Response, zone: DropZone) {
     if app.ui.mode != crate::state::Mode::Painting {
         return;
+    }
+
+    if zone == DropZone::View3d {
+        DecalDrop::show_menu(app, ui, response);
     }
 
     let tokens = Tokens::get(ui.ctx());
@@ -177,7 +187,7 @@ pub fn drop_target(app: &mut TextureCraftApp, ui: &Ui, response: &egui::Response
         Asset::Texture(_) => zone == DropZone::View3d,
         Asset::SmartMask(_) | Asset::Filter(_) => false,
     };
-    let onto_set = |asset: &Asset| zone == DropZone::View3d && asset.is_material();
+    let onto_set = |asset: &Asset| zone == DropZone::View3d && asset.goes_onto_set();
     if response.dnd_hover_payload::<ShelfDrag>().is_some_and(|drag| accepts(&drag) && !onto_set(&drag.asset)) {
         ui.painter().rect_stroke(response.rect.shrink(1.0), 3.0, Stroke::new(2.0, tokens.accent), egui::StrokeKind::Inside);
     }
@@ -186,11 +196,20 @@ pub fn drop_target(app: &mut TextureCraftApp, ui: &Ui, response: &egui::Response
     let Some(drag) = dnd_release::<ShelfDrag>(response).filter(|drag| accepts(drag)) else { return };
 
     match (&drag.asset, pointer) {
-        (Asset::Texture(name), Some(position)) => {
-            let (local_position, viewport_size) = (position - response.rect.min, response.rect.size());
-            app.run("layer.add.decal", json!({"image": name, "x": local_position.x, "y": local_position.y, "viewport": [viewport_size.x, viewport_size.y]}));
-        }
         // The background takes nothing
+        (Asset::Texture(name), Some(position)) => {
+            let Some(texture_set) = set_under_pointer(app, ui, response) else { return };
+
+            let drop = DecalDrop {
+                image: name.clone(),
+                texture_set,
+                view_position: position - response.rect.min,
+                view_size: response.rect.size(),
+                camera: app.session.camera,
+                screen_position: position,
+            };
+            drop.open(ui);
+        }
         (asset, _) if onto_set(asset) => {
             let Some(ts) = set_under_pointer(app, ui, response) else { return };
 

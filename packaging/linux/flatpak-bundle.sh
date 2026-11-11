@@ -26,7 +26,7 @@ if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi
 TEST=1
 OCI=0
 TARBALL=""
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-test) TEST=0; shift ;;
     --oci) OCI=1; shift ;;
@@ -44,7 +44,7 @@ case "$ARCH" in
 esac
 BASENAME="texturecraft-$VERSION-linux-$ARCH"
 TARBALL="${TARBALL:-$DIST/$BASENAME.tar.gz}"
-[ -f "$TARBALL" ] || { echo "error: $TARBALL not found (run packaging/linux/package.sh --formats tar first)" >&2; exit 1; }
+[[ -f "$TARBALL" ]] || { echo "error: $TARBALL not found (run packaging/linux/package.sh --formats tar first)" >&2; exit 1; }
 for tool in flatpak flatpak-builder; do
   command -v "$tool" >/dev/null || { echo "error: $tool not found (apt install flatpak flatpak-builder librsvg2-common)" >&2; exit 1; }
 done
@@ -55,7 +55,7 @@ WORK="$CARGO_TARGET_DIR/flatpak-bundle"
 rm -rf "$WORK"
 mkdir -p "$WORK/stage"
 tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
-[ -x "$WORK/stage/bin/texturecraft" ] || { echo "error: $TARBALL has no bin/texturecraft" >&2; exit 1; }
+[[ -x "$WORK/stage/bin/texturecraft" ]] || { echo "error: $TARBALL has no bin/texturecraft" >&2; exit 1; }
 cp "$HERE/flatpak/ai.storyteller.TextureCraft.bundle.yml" "$WORK/$APP_ID.yml"
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB"
@@ -83,7 +83,7 @@ if [[ "$OCI" = 1 ]]; then
   echo "wrote OCI layout to $OUT_OCI"
 fi
 
-if [ "$TEST" = 1 ]; then
+if [[ "$TEST" = 1 ]]; then
   flatpak install --user -y --noninteractive --reinstall "$OUT"
   flatpak info --user "$APP_ID"
   flatpak run --command=texturecraft-cli "$APP_ID" --version

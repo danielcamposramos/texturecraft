@@ -367,7 +367,12 @@ pub(crate) fn history(app: &mut TextureCraftApp, ui: &mut Ui) {
                     // Each row is the state after that many steps
                     let steps = done_count - row as i64;
                     if ui.selectable_label(steps == 0, text).on_hover_text(tr("Return to this step")).clicked() {
-                        jump = steps;
+                        // Point history is consumed before the document rows shown here
+                        jump = if steps >= 0 {
+                            app.session.history_undo_steps(steps as usize) as i64
+                        } else {
+                            -(app.session.history_redo_steps((-steps) as usize) as i64)
+                        };
                     }
                 }
             });
@@ -384,6 +389,7 @@ pub(crate) fn history(app: &mut TextureCraftApp, ui: &mut Ui) {
 /// What the start window was asked for.
 enum Start {
     Menu(&'static str),
+    #[cfg(not(target_arch = "wasm32"))]
     Recent(String),
     Close,
 }
@@ -393,7 +399,9 @@ fn start(app: &mut TextureCraftApp, ctx: &egui::Context) {
     if !app.ui.windows.start {
         return;
     }
-    let tk = Tokens::get(ctx);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let tokens = Tokens::get(ctx);
     let mut open = true;
     let mut action = None;
     dialog("start", "TextureCraft", &mut open).min_width(380.0).show(ctx, |ui| {
@@ -405,11 +413,12 @@ fn start(app: &mut TextureCraftApp, ctx: &egui::Context) {
                 action = Some(Start::Menu("file.open"));
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
         if file_dialogs_available() {
             ui.add_space(8.0);
             ui.label(caption(tr("Recent projects")));
             if app.ui.recent.is_empty() {
-                ui.label(RichText::new(tr("No recent projects yet")).color(tk.text_dim));
+                ui.label(RichText::new(tr("No recent projects yet")).color(tokens.text_dim));
             }
             for path in &app.ui.recent {
                 let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path);
@@ -433,15 +442,17 @@ fn start(app: &mut TextureCraftApp, ctx: &egui::Context) {
             });
         });
     });
-    if let Some(a) = action {
+
+    if let Some(action) = action {
         app.ui.windows.start = false;
-        match a {
+        match action {
             Start::Menu(id) => crate::menus::invoke(app, ctx, id),
             #[cfg(not(target_arch = "wasm32"))]
             Start::Recent(path) => open_path(app, &path),
-            _ => {}
+            Start::Close => {}
         }
     }
+
     if !open {
         app.ui.windows.start = false;
     }
@@ -565,6 +576,25 @@ fn new_project(app: &mut TextureCraftApp, ctx: &egui::Context) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn settings_resources(ctx: &egui::Context) -> (u32, u64) {
+    let id = egui::Id::unique("settings_resources");
+    let now = ctx.input(|input| input.time);
+    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+    // Query the operating system once a second while Settings is open, rather than every frame
+    if let Some((sampled_at, cores, available_ram_bytes)) = ctx.data(|data| data.get_temp::<(f64, u32, u64)>(id))
+        && (0.0..1.0).contains(&(now - sampled_at))
+    {
+        return (cores, available_ram_bytes);
+    }
+
+    let (cores, available_ram_bytes) = texturecraft_engine::formats::available_save_resources();
+    let cores = u32::try_from(cores).unwrap_or(u32::MAX);
+    ctx.data_mut(|data| data.insert_temp(id, (now, cores, available_ram_bytes)));
+    (cores, available_ram_bytes)
+}
+
 fn settings(app: &mut TextureCraftApp, ctx: &egui::Context) {
     let tk = Tokens::get(ctx);
     let mut open = app.ui.windows.settings;
@@ -646,14 +676,40 @@ fn settings(app: &mut TextureCraftApp, ctx: &egui::Context) {
             ui.end_row();
         });
         ui.add_space(8.0);
+        ui.label(caption(tr("Project")));
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            ui.label(caption(tr("Project")));
-            form("settings_project").show(ui, |ui| {
+        let (available_cores, available_ram_bytes) = settings_resources(ctx);
+        form("settings_project").show(ui, |ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
                 ui.label(tr("Autosave every"));
                 ui.add(egui::DragValue::new(&mut p.autosave_minutes).range(0..=120).suffix(format!(" {}", tr("min"))));
                 ui.end_row();
-            });
+                let label = ui.label(tr("Cores kept for the UI"));
+                ui.add(egui::DragValue::new(&mut p.reserved_cores).range(0..=available_cores)).labelled_by(label.id);
+                ui.end_row();
+            }
+
+            let label = ui.label(tr("Max project size on open"));
+            ui.add(egui::DragValue::new(&mut p.project_open_limit_gib).range(1..=u32::MAX).suffix(" GiB"))
+                .labelled_by(label.id)
+                .on_hover_text(tr("Maximum decompressed project data. Increase this limit to open larger projects."));
+            ui.end_row();
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let label = ui.label(tr("Max RAM while saving"));
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut p.save_ram_percent).range(1..=100).suffix(" %")).labelled_by(label.id);
+                    let budget_bytes = texturecraft_engine::formats::save_ram_budget(available_ram_bytes, p.save_ram_percent);
+                    ui.label(format!("≈ {:.2} GiB", budget_bytes as f64 / (1_u64 << 30) as f64));
+                });
+                ui.end_row();
+            }
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.label(RichText::new(tr("Saving uses the other cores and at most this share of the free RAM. At least one core always works.")).small().color(tk.text_dim));
             ui.label(
                 RichText::new(trf("0 turns autosave off. Copies go to {folder}", &[("folder", &crate::user_dir("autosave").display())]))
                     .small()
@@ -803,15 +859,9 @@ pub fn layout_file(app: &mut TextureCraftApp, save: bool) {
                 .and_then(|bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))
                 .map(|_| trf("Saved UI layout {path}", &[("path", &path.display())]))
         } else {
-            // A layout file is small; refuse to read more than 16 MiB.
-            std::fs::File::open(path)
-                .and_then(|f| {
-                    use std::io::Read as _;
-                    let mut bytes = Vec::new();
-                    f.take((16 << 20) + 1).read_to_end(&mut bytes).map(|_| bytes)
-                })
+            // Layouts are small; bound both the initial size and any growth during the read
+            texturecraft_engine::formats::read_capped(path, 16 << 20)
                 .map_err(|e| e.to_string())
-                .and_then(|bytes| if bytes.len() > 16 << 20 { Err("layout file is larger than 16 MiB".to_string()) } else { Ok(bytes) })
                 .and_then(|bytes| serde_json::from_slice::<crate::UiState>(&bytes).map_err(|e| e.to_string()))
                 .map(|layout| {
                     app.ui.adopt_layout(layout);

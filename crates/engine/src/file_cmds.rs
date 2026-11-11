@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 #[cfg(not(target_arch = "wasm32"))]
-use texturecraft_core::PROJECT_EXT;
-use texturecraft_core::{NormalFormat, Project, TextureSet};
+use texturecraft_core::{NormalFormat, PROJECT_EXT};
+use texturecraft_core::{Project, TextureSet};
 use texturecraft_formats::{ExportInput, ExportOptions, ExportedFile, FileFormat, Padding, ProjectFile};
 use texturecraft_geom::{Mesh, primitives};
 

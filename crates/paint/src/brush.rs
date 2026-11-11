@@ -130,33 +130,82 @@ pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Mirror and radial symmetry through the mesh center.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Largest symmetry offset kept from a command or a file (world units), far beyond any mesh
+const MAX_SYMMETRY_OFFSET: f32 = 1.0e6;
+
+/// Mirror and radial symmetry through the mesh center, optionally moved by `offset`
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Symmetry {
+    /// The toolbar's Symmetry toggle: off keeps the settings below but paints no copies
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
     pub x: bool,
     pub y: bool,
     pub z: bool,
-    /// Radial symmetry: copies spread evenly around `axis` (0 or 1: off; at most 32).
+    /// Radial copies around `axis`, spread over `angle_span` (0 or 1: off; at most [`MAX_RADIAL_COPIES`])
     #[serde(default)]
     pub radial: u8,
-    /// Axis of radial symmetry: 0 = X, 1 = Y, 2 = Z.
+    /// Axis of radial symmetry (0 = X, 1 = Y, 2 = Z), independent of the mirror axes
     #[serde(default = "radial_axis")]
     pub axis: u8,
+    /// Where the mirror planes and the radial axis cross, relative to the mesh center (world units)
+    #[serde(default)]
+    pub offset: [f32; 3],
+    /// Degrees the radial copies spread over: a full turn spaces them evenly, less puts the first and last copy at its ends
+    #[serde(default = "full_turn")]
+    pub angle_span: f32,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 fn radial_axis() -> u8 {
     1
 }
 
+fn full_turn() -> f32 {
+    FULL_TURN_DEGREES
+}
+
+/// [`Symmetry::angle_span`] of a full turn
+pub const FULL_TURN_DEGREES: f32 = 360.0;
+
+/// Most radial copies a brush paints
+pub const MAX_RADIAL_COPIES: u8 = 32;
+
+/// [`Symmetry::axis`] of the last axis, Z
+const LAST_AXIS: u8 = 2;
+
 impl Default for Symmetry {
     fn default() -> Self {
-        Symmetry { x: false, y: false, z: false, radial: 0, axis: radial_axis() }
+        Symmetry { enabled: enabled_by_default(), x: false, y: false, z: false, radial: 0, axis: radial_axis(), offset: [0.0; 3], angle_span: full_turn() }
     }
 }
 
 impl Symmetry {
+    /// Whether symmetry is on with an axis to mirror on or radial copies
     pub fn any(&self) -> bool {
-        self.x || self.y || self.z || self.radial > 1
+        self.enabled && (self.x || self.y || self.z || self.radial > 1)
+    }
+
+    /// Whether radial symmetry is on (see [`Symmetry::radial_on`] for whether it paints copies)
+    pub fn radial_mode(&self) -> bool {
+        self.enabled && self.radial > 1
+    }
+
+    /// Whether radial copies are painted: with no angle to spread over they would all land on the stroke
+    pub fn radial_on(&self) -> bool {
+        self.radial_mode() && self.angle_span > 0.0
+    }
+
+    /// Rotation (radians) of radial copy number `copy` (0 = the stroke itself) around the axis
+    pub fn radial_angle(&self, copy: u8) -> f32 {
+        if self.angle_span >= FULL_TURN_DEGREES {
+            f32::from(copy) * std::f32::consts::TAU / f32::from(self.radial.max(1))
+        } else {
+            f32::from(copy) * self.angle_span.to_radians() / f32::from(self.radial.saturating_sub(1).max(1))
+        }
     }
 
     /// Mirror scales in stroke order, including identity, without allocating
@@ -172,26 +221,39 @@ impl Symmetry {
             Vec3::NEG_ONE,
         ]
         .into_iter()
-        .filter(|sign| (sign.x > 0.0 || self.x) && (sign.y > 0.0 || self.y) && (sign.z > 0.0 || self.z))
+        .filter(|sign| *sign == Vec3::ONE || (self.enabled && (sign.x > 0.0 || self.x) && (sign.y > 0.0 || self.y) && (sign.z > 0.0 || self.z)))
     }
 
-    /// Linear maps (through the mesh center) taking a point to each of its symmetry copies,
-    /// the identity first. Mirrors come first, then radial rotations of the point and its mirrors.
+    /// The point the mirror planes and the radial axis pass through, for a mesh centered at `center`
+    pub fn origin(&self, center: Vec3) -> Vec3 {
+        center + Vec3::from(self.offset)
+    }
+
+    /// [`Symmetry::axis`] as an index (0 = X, 1 = Y, 2 = Z), out-of-range values read as Z
+    pub fn axis_index(&self) -> usize {
+        usize::from(self.axis.min(LAST_AXIS))
+    }
+
+    /// Axis of radial symmetry as a unit vector
+    pub fn radial_axis(&self) -> Vec3 {
+        [Vec3::X, Vec3::Y, Vec3::Z][self.axis_index()]
+    }
+
+    /// Linear maps `m` taking a point to its copies as `origin + m * (p - origin)`: identity, mirrors, then their radial turns
     pub fn transforms(&self) -> Vec<Mat3> {
-        let mut out: Vec<Mat3> = self.mirror_signs().map(Mat3::from_diagonal).collect();
+        let mut maps: Vec<Mat3> = self.mirror_signs().map(Mat3::from_diagonal).collect();
 
-        if self.radial > 1 {
-            let axis = [Vec3::X, Vec3::Y, Vec3::Z].get(self.axis as usize).copied().unwrap_or(Vec3::Y);
-            let base = out.clone();
-            out.reserve(base.len().saturating_mul(usize::from(self.radial - 1)));
+        if self.radial_on() {
+            let mirrors = maps.clone();
+            maps.reserve(mirrors.len().saturating_mul(usize::from(self.radial - 1)));
 
-            for k in 1..self.radial {
-                let r = Mat3::from_axis_angle(axis, f32::from(k) * std::f32::consts::TAU / f32::from(self.radial));
-                out.extend(base.iter().map(|m| r * *m));
+            for copy in 1..self.radial {
+                let turn = Mat3::from_axis_angle(self.radial_axis(), self.radial_angle(copy));
+                maps.extend(mirrors.iter().map(|mirror| turn * *mirror));
             }
         }
 
-        out
+        maps
     }
 }
 
@@ -291,30 +353,37 @@ impl Default for BrushSettings {
 }
 
 impl BrushSettings {
-    /// Clamp every value into its valid range (input from UI, CLI or agents).
+    /// Clamp every value into its valid range (input from UI, CLI or agents)
     pub fn sanitized(&self) -> BrushSettings {
-        let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        let clamp_finite = |value: f32, min: f32, max: f32, default: f32| if value.is_finite() { value.clamp(min, max) } else { default };
+
         BrushSettings {
-            size: f(self.size, 0.0005, 0.5, 0.02),
-            min_size: f(self.min_size, 0.0, 1.0, 0.05),
-            flow: f(self.flow, 0.0, 1.0, 1.0),
-            opacity: f(self.opacity, 0.0, 1.0, 1.0),
-            spacing: f(self.spacing, 0.01, 10.0, 0.1),
-            hardness: f(self.hardness, 0.0, 0.999, 0.5),
-            angle: f(self.angle, -360.0, 360.0, 0.0),
-            angle_fade: (f(self.angle_fade.0, 0.0, 90.0, 70.0), f(self.angle_fade.1, 0.0, 90.0, 85.0)),
-            lazy: f(self.lazy, 0.0, 500.0, 0.0),
-            jitter_size: f(self.jitter_size, 0.0, 1.0, 0.0),
-            jitter_angle: f(self.jitter_angle, 0.0, 1.0, 0.0),
-            jitter_flow: f(self.jitter_flow, 0.0, 1.0, 0.0),
-            jitter_position: f(self.jitter_position, 0.0, 4.0, 0.0),
-            depth: f(self.depth, 0.05, 4.0, 1.0),
-            symmetry: Symmetry { radial: self.symmetry.radial.min(32), axis: self.symmetry.axis.min(2), ..self.symmetry },
+            size: clamp_finite(self.size, 0.0005, 0.5, 0.02),
+            min_size: clamp_finite(self.min_size, 0.0, 1.0, 0.05),
+            flow: clamp_finite(self.flow, 0.0, 1.0, 1.0),
+            opacity: clamp_finite(self.opacity, 0.0, 1.0, 1.0),
+            spacing: clamp_finite(self.spacing, 0.01, 10.0, 0.1),
+            hardness: clamp_finite(self.hardness, 0.0, 0.999, 0.5),
+            angle: clamp_finite(self.angle, -360.0, 360.0, 0.0),
+            angle_fade: (clamp_finite(self.angle_fade.0, 0.0, 90.0, 70.0), clamp_finite(self.angle_fade.1, 0.0, 90.0, 85.0)),
+            lazy: clamp_finite(self.lazy, 0.0, 500.0, 0.0),
+            jitter_size: clamp_finite(self.jitter_size, 0.0, 1.0, 0.0),
+            jitter_angle: clamp_finite(self.jitter_angle, 0.0, 1.0, 0.0),
+            jitter_flow: clamp_finite(self.jitter_flow, 0.0, 1.0, 0.0),
+            jitter_position: clamp_finite(self.jitter_position, 0.0, 4.0, 0.0),
+            depth: clamp_finite(self.depth, 0.05, 4.0, 1.0),
+            symmetry: Symmetry {
+                radial: self.symmetry.radial.min(MAX_RADIAL_COPIES),
+                axis: self.symmetry.axis.min(LAST_AXIS),
+                offset: self.symmetry.offset.map(|value| clamp_finite(value, -MAX_SYMMETRY_OFFSET, MAX_SYMMETRY_OFFSET, 0.0)),
+                angle_span: clamp_finite(self.symmetry.angle_span, 0.0, FULL_TURN_DEGREES, FULL_TURN_DEGREES),
+                ..self.symmetry
+            },
             particles: Particles {
                 enabled: self.particles.enabled,
                 count: self.particles.count.clamp(1, 16),
                 lifetime: self.particles.lifetime.clamp(1, 128),
-                gravity: f(self.particles.gravity, 0.0, 2.0, 1.0),
+                gravity: clamp_finite(self.particles.gravity, 0.0, 2.0, 1.0),
             },
             ..self.clone()
         }

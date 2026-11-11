@@ -181,6 +181,32 @@ fn quick_mask_limits_painting() {
     assert!(color_at(&s, 150.0, 200.0)[1] > 0.85, "disabled: everything is open");
 }
 
+/// How much redder than green a texel must be to count as painted (faded edges included)
+const PAINTED_TINT: f32 = 0.05;
+
+/// Separate painted runs down texture column `x` (base color tinted red)
+fn painted_runs(session: &Session, x: u32) -> usize {
+    let painted = |y: u32| {
+        let color = session.caches[0].composite.value(Channel::BaseColor, x, y);
+        color[0] - color[1] > PAINTED_TINT
+    };
+    (0..RES as u32).filter(|&y| painted(y) && (y == 0 || !painted(y - 1))).count()
+}
+
+#[test]
+fn a_stroke_to_the_edge_of_the_mesh_fades_without_breaking_into_dots() {
+    let mut session = session();
+    paint_red(&mut session, 4.0);
+    // From the middle of the view to past the ball's right edge, above center
+    let points: Vec<Value> = (0..40).map(|step| json!([200.0 + step as f32 * 6.0, 165.0])).collect();
+    execute(&mut session, "tool.stroke", &json!({"points": points})).unwrap();
+    session.update();
+
+    // The stroke crosses each texture column once, also where the surface turns away from the camera
+    let broken: Vec<u32> = (0..RES as u32).filter(|&x| painted_runs(&session, x) > 1).collect();
+    assert!(broken.is_empty(), "columns with gaps: {broken:?}");
+}
+
 #[test]
 fn swap_mask_value_inverts_only_while_a_mask_is_the_target() {
     let mut session = session();

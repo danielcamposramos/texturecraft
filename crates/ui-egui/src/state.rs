@@ -118,6 +118,13 @@ pub struct Prefs {
     /// Where autosaves, smart materials, presets, templates and layouts go (desktop; read at
     /// startup). Empty or relative: `Documents/TextureCraft`.
     pub data_folder: String,
+    /// Cores a project save leaves to the UI; Settings bounds this to the available logical CPUs
+    /// (desktop). At least one save worker always runs.
+    pub reserved_cores: u32,
+    /// Maximum decompressed project size accepted on open, in GiB (at least one).
+    pub project_open_limit_gib: u32,
+    /// Percent of the free RAM a project save may hold at once (desktop; 1 to 100).
+    pub save_ram_percent: u8,
 }
 
 impl Default for Prefs {
@@ -132,7 +139,19 @@ impl Default for Prefs {
             system_title_bar: false,
             start_window: true,
             data_folder: String::new(),
+            reserved_cores: 1,
+            project_open_limit_gib: texturecraft_engine::formats::DEFAULT_PROJECT_OPEN_LIMIT_GIB,
+            save_ram_percent: 50,
         }
+    }
+}
+
+impl Prefs {
+    /// Apply resource preferences before commands or file workers can start.
+    pub fn apply_resource_limits(&self) {
+        texturecraft_engine::formats::set_project_open_limit_gib(self.project_open_limit_gib);
+        #[cfg(not(target_arch = "wasm32"))]
+        texturecraft_engine::formats::set_save_resources(self.reserved_cores as usize, self.save_ram_percent);
     }
 }
 
@@ -257,6 +276,9 @@ pub struct UiState {
     /// The docked, tabbed and floating panels around the viewport.
     #[serde(default)]
     pub dock: Dock,
+    /// The panel open against the icon rail, if any; not saved, so the app starts with the rail closed
+    #[serde(skip)]
+    pub rail_panel: Option<crate::docking::Panel>,
     #[serde(default = "Dock::for_baking")]
     pub(crate) inactive_mode_dock: Dock,
     #[serde(default)]
@@ -304,6 +326,9 @@ pub struct UiState {
     /// The brush that paints the skew correction map in the 2D view of bake mode.
     #[serde(default)]
     pub bake_paint_brush: crate::bake_mode::BakePaintBrush,
+    /// How the 3D view shows symmetry
+    #[serde(default)]
+    pub symmetry: crate::symmetry::SymmetryDisplay,
     /// What bake mode's 3D view draws besides the low poly (the Baking Visualization panel)
     #[serde(default)]
     pub bake_visualization: crate::bake_mode::BakeVisualizationToggles,
@@ -353,6 +378,7 @@ impl Default for UiState {
             layout: ViewLayout::Split,
             split_ratio: default_split_ratio(),
             dock: Dock::default(),
+            rail_panel: None,
             inactive_mode_dock: Dock::for_baking(),
             dock_is_baking: false,
             bake_layout_version: BAKE_LAYOUT_VERSION,
@@ -376,6 +402,7 @@ impl Default for UiState {
             recent: Vec::new(),
             keymap: Keymap::new(),
             bake_paint_brush: crate::bake_mode::BakePaintBrush::default(),
+            symmetry: crate::symmetry::SymmetryDisplay::default(),
             bake_visualization: crate::bake_mode::BakeVisualizationToggles::default(),
         }
     }

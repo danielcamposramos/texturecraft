@@ -25,6 +25,7 @@ pub fn specs() -> Vec<CommandSpec> {
 /// Fonts bundled with the app (egui's), used when nothing is installed or in the browser.
 const BUILT_IN: [(&str, &[u8]); 2] = [("Ubuntu Light", epaint_default_fonts::UBUNTU_LIGHT), ("Hack", epaint_default_fonts::HACK_REGULAR)];
 /// Families tried, in order, when no font is asked for.
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_FAMILIES: [&str; 6] = ["Arial", "Segoe UI", "Helvetica", "Liberation Sans", "DejaVu Sans", "Noto Sans"];
 /// Largest font file read.
 #[cfg(not(target_arch = "wasm32"))]

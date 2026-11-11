@@ -253,14 +253,11 @@ fn tool_controls(app: &mut TextureCraftApp, ui: &mut egui::Ui, tokens: &Tokens) 
             }
 
             ui.separator();
-            if icon_button(ui, ic::FLIP_HORIZONTAL, tr("Symmetry (X)"), brush.symmetry.x, button_size).clicked() {
-                brush.symmetry.x = !brush.symmetry.x;
-            }
-            if icon_button(ui, ic::FLIP_VERTICAL, tr("Symmetry (Y)"), brush.symmetry.y, button_size).clicked() {
-                brush.symmetry.y = !brush.symmetry.y;
-            }
             if icon_button(ui, ic::CLOUD_RAIN, tr("Particle brush: particles slide down the surface"), brush.particles.enabled, button_size).clicked() {
                 brush.particles.enabled = !brush.particles.enabled;
+            }
+            if crate::symmetry::applies_to(tool) {
+                crate::symmetry::toolbar_controls(app, ui);
             }
 
             if tool == Tool::Smudge {
@@ -325,25 +322,25 @@ pub fn fill_mode_buttons(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
 /// Path tool options and actions (top bar and properties)
 pub fn path_controls(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
     let button_size = ui.spacing().interact_size.y;
-    let path = &mut app.session.tool.path;
-    if icon_button(ui, ic::POLYGON, tr("Closed path"), path.closed, button_size).clicked() {
-        path.closed = !path.closed;
-    }
-    let fill_tip = if path.closed { tr("Fill the closed path (lasso)") } else { tr("Fill the path (close it first)") };
-    if icon_button(ui, ic::PAINT_BUCKET, fill_tip, path.fill, button_size).clicked() {
-        path.fill = !path.fill;
+    let path = &app.session.tool.path;
+    let (closed, fill) = (path.closed, path.fill);
+    let selected = path.selected.is_some_and(|i| i < path.points.len());
+    let has_points = !path.points.is_empty();
+    if icon_button(ui, ic::POLYGON, tr("Closed path"), closed, button_size).clicked() {
+        app.session.set_path_closed(!closed);
     }
 
-    let has_points = !path.points.is_empty();
-    if ui
-        .add_enabled(has_points, egui::Button::new(format!("{} {}", ic::CHECK, tr("Apply"))))
-        .on_hover_text(tr("Paint the path with the brush (Enter)"))
-        .clicked()
-    {
-        app.run("tool.path", json!({"commit": true}));
+    let fill_tip = if closed { tr("Fill the closed path (lasso)") } else { tr("Fill the path (close it first)") };
+    if icon_button(ui, ic::PAINT_BUCKET, fill_tip, fill, button_size).clicked() {
+        app.session.set_path_fill(!fill);
     }
-    if ui.add_enabled(has_points, egui::Button::new(format!("{} {}", ic::X, tr("Cancel")))).on_hover_text(tr("Remove the path (Esc)")).clicked() {
-        app.run("tool.path", json!({"clear": true}));
+
+    if ui.add_enabled_ui(selected, |ui| icon_button(ui, ic::BACKSPACE, tr("Remove point"), false, button_size)).inner.clicked() {
+        app.session.remove_selected_path_point();
+    }
+
+    if ui.add_enabled_ui(has_points, |ui| icon_button(ui, ic::CHECK, tr("Apply"), false, button_size)).inner.clicked() {
+        app.run("tool.path", json!({"commit": true}));
     }
 }
 
@@ -386,22 +383,39 @@ pub fn tool_shelf(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Width of the icon rail beside the dock
+const RAIL_WIDTH: f32 = 38.0;
+
+/// Size of the rail's icons
+const RAIL_ICON_SIZE: f32 = 26.0;
+
+/// Gap between the rail's icons
+const RAIL_ICON_GAP: f32 = 4.0;
+
+/// Padding inside the rail's card around its icons, as the tool shelf's
+const RAIL_CARD_PADDING: egui::Margin = egui::Margin::symmetric(3, 6);
+
+/// The icon rail: Export, then the rail panels that are not in the dock, each opening its popup
 pub fn rail(app: &mut TextureCraftApp, ui: &mut egui::Ui) {
-    let tk = Tokens::get(ui.ctx());
-    egui::Panel::right("rail").resizable(false).exact_size(38.0).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
-        card(ui, &tk, egui::Margin { left: 0, right: GUTTER, top: GUTTER, bottom: GUTTER }, egui::Margin::symmetric(3, 6), |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            if icon_button(ui, ic::EXPORT, &tip(&app.ui.keymap, tr("Export textures"), "ui.export"), app.ui.windows.export, 26.0).clicked() {
+    let tokens = Tokens::get(ui.ctx());
+    egui::Panel::right("rail").resizable(false).exact_size(RAIL_WIDTH).show_separator_line(false).frame(egui::Frame::NONE).show(ui, |ui| {
+        card(ui, &tokens, egui::Margin { left: 0, right: GUTTER, top: GUTTER, bottom: GUTTER }, RAIL_CARD_PADDING, |ui| {
+            ui.spacing_mut().item_spacing.y = RAIL_ICON_GAP;
+            crate::rail_popup::begin_rail(ui.ctx(), ui.max_rect());
+            if icon_button(ui, ic::EXPORT, &tip(&app.ui.keymap, tr("Export textures"), "ui.export"), app.ui.windows.export, RAIL_ICON_SIZE).clicked() {
                 app.ui.windows.export = !app.ui.windows.export;
             }
-            for (panel, icon, id) in [
-                (Panel::TextureSetSettings, ic::STACK, "ui.view.textureSetSettings"),
-                (Panel::Display, ic::MONITOR, "ui.view.display"),
-                (Panel::Shader, ic::SLIDERS_HORIZONTAL, "ui.view.shader"),
-                (Panel::History, ic::CLOCK_COUNTER_CLOCKWISE, "ui.view.history"),
-            ] {
-                if icon_button(ui, icon, &tip(&app.ui.keymap, tr(panel.name()), id), app.ui.dock.is_visible(panel), 26.0).clicked() {
-                    app.ui.dock.toggle(panel);
+
+            // A panel in the dock, docked or floating, leaves the rail until it is closed there
+            for (panel, icon, id) in crate::rail_popup::RAIL_PANELS {
+                if app.ui.dock.is_open(panel) {
+                    continue;
+                }
+
+                let response = icon_button(ui, icon, &tip(&app.ui.keymap, tr(panel.name()), id), app.ui.rail_panel == Some(panel), RAIL_ICON_SIZE);
+                crate::rail_popup::remember_icon(ui.ctx(), panel, response.rect);
+                if response.clicked() {
+                    crate::rail_popup::toggle(app, panel);
                 }
             }
         });

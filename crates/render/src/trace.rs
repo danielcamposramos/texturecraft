@@ -66,6 +66,9 @@ pub struct TraceScene {
     pub lens: Option<[f32; 2]>,
 }
 
+/// Width of the built-in environments traced (texels).
+const ENV_SIZE: u32 = 1024;
+
 impl TraceScene {
     pub fn new(mesh: Arc<Mesh>, bvh: Arc<Bvh>, sets: Vec<TraceSet>, env: Arc<EnvImage>, env_rotation: f32) -> TraceScene {
         let mut tri_set = vec![usize::MAX; mesh.triangle_count()];
@@ -114,13 +117,24 @@ impl TraceScene {
     /// The scene as `display` shows it: the imported environment `env_image` (when the display
     /// names a resource and it decodes) or the built-in one, its rotation and the shading mode.
     pub fn for_display(mesh: Arc<Mesh>, bvh: Arc<Bvh>, sets: Vec<TraceSet>, display: &DisplaySettings, env_image: Option<&ImageRes>) -> TraceScene {
+        TraceScene::for_display_env(mesh, bvh, sets, display, Arc::new(TraceScene::display_env(display, env_image)))
+    }
+
+    /// The environment [`TraceScene::for_display`] traces under (building it takes a while: a
+    /// caller that rebuilds scenes often keeps it and passes it to [`TraceScene::for_display_env`]).
+    pub fn display_env(display: &DisplaySettings, env_image: Option<&ImageRes>) -> EnvImage {
         let imported = env_image.and_then(|i| EnvImage::from_rgba(i.width, i.height, &i.rgba, i.srgb));
-        let env = imported.unwrap_or_else(|| crate::ibl::environment(&display.environment, 1024));
-        let mut scene = TraceScene::new(mesh, bvh, sets, Arc::new(env), display.env_rotation.to_radians());
+        imported.unwrap_or_else(|| crate::ibl::environment(&display.environment, ENV_SIZE))
+    }
+
+    /// [`TraceScene::for_display`] under `env`, from [`TraceScene::display_env`] of the same display.
+    pub fn for_display_env(mesh: Arc<Mesh>, bvh: Arc<Bvh>, sets: Vec<TraceSet>, display: &DisplaySettings, env: Arc<EnvImage>) -> TraceScene {
+        let mut scene = TraceScene::new(mesh, bvh, sets, env, display.env_rotation.to_radians());
         scene.spec_gloss = display.spec_gloss;
         scene.set_scatter(display.scatter_color, display.scatter_radius);
         scene.ior = display.ior;
         scene.lens = display.dof.enabled.then_some([display.dof.focus_distance, display.dof.aperture]);
+
         scene
     }
 

@@ -10,7 +10,7 @@ use texturecraft_engine::core::{
     LinkParam, MaterialLink, ProceduralKind, Projection, Source,
 };
 use texturecraft_engine::filter_lib::scalar_params;
-use texturecraft_engine::paint::{BrushAlpha, alphas};
+use texturecraft_engine::paint::{BrushAlpha, BrushSettings, alphas};
 use texturecraft_engine::{CloneFrom, StackTarget, Tool};
 
 use crate::TextureCraftApp;
@@ -19,7 +19,8 @@ use crate::layer_panel::{effect_preview_size, effect_row_height, layer_preview_s
 use crate::shelf::{Asset, ShelfDrag};
 use crate::state::PropsTab;
 use crate::theme::{Tokens, caption};
-use crate::widgets::{chip, color_swatch, combo, dnd_release, elided, histogram, icon_button, section, slider, slider_edit};
+use crate::toolbar::{MAX_BRUSH_SIZE, MIN_BRUSH_SIZE};
+use crate::widgets::{chip, color_swatch, combo, dnd_release, elided, icon_button, section, section_with_reset, slider, slider_edit};
 
 /// The filter Add filter adds: at its defaults it changes nothing, and its slot opens the picker to swap it
 const NEW_FILTER: &str = "hsl";
@@ -1136,6 +1137,8 @@ pub(crate) fn properties_title(app: &TextureCraftApp) -> String {
 }
 
 pub(crate) fn properties(app: &mut TextureCraftApp, ui: &mut Ui) {
+    // A floating scroll bar would cover the right-aligned slider values and section reset icons
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
     egui::ScrollArea::vertical().id_salt("props").auto_shrink([false, false]).show(ui, |ui| properties_contents(app, ui));
 }
 
@@ -1456,104 +1459,130 @@ fn polygon_fill_paints_mask(app: &TextureCraftApp) -> Result<bool, String> {
     }
 }
 
+/// Font size of the dim hint line under the Brush caption
+const HINT_TEXT_SIZE: f32 = 10.5;
+
 fn brush_section(app: &mut TextureCraftApp, ui: &mut Ui) {
-    let b = &mut app.session.tool.brush;
+    let brush = &mut app.session.tool.brush;
+    let defaults = BrushSettings::default();
     ui.label(caption(tr("Brush")));
     let hint = tr("Ctrl+right-drag in a view sets the size and hardness, Ctrl+left-drag the flow and angle.");
-    ui.label(RichText::new(hint).size(10.5).color(Tokens::get(ui.ctx()).text_dim));
-    section(ui, "sec_size", tr("Size"), true, |ui| {
-        let mut size = b.size / 0.25 * 100.0;
-        if slider(ui, tr("Size"), &mut size, 0.05..=100.0, 1).changed() {
-            b.size = (size / 100.0 * 0.25).clamp(0.0005, 0.25);
+    ui.label(RichText::new(hint).size(HINT_TEXT_SIZE).color(Tokens::get(ui.ctx()).text_dim));
+
+    // Each section's reset puts back only the fields it shows
+    let size_fields = |settings: &BrushSettings| (settings.size, settings.min_size, settings.screen_space);
+    if section_with_reset(ui, "sec_size", tr("Size"), true, size_fields(brush) == size_fields(&defaults), |ui| {
+        let mut size_percent = brush.size / MAX_BRUSH_SIZE * 100.0;
+        if slider(ui, tr("Size"), &mut size_percent, 0.05..=100.0, 1).changed() {
+            brush.size = (size_percent / 100.0 * MAX_BRUSH_SIZE).clamp(MIN_BRUSH_SIZE, MAX_BRUSH_SIZE);
         }
-        let mut ms = b.min_size * 100.0;
-        if slider(ui, tr("Minimum size (%)"), &mut ms, 0.0..=100.0, 0).changed() {
-            b.min_size = ms / 100.0;
+
+        let mut min_size_percent = brush.min_size * 100.0;
+        if slider(ui, tr("Minimum size (%)"), &mut min_size_percent, 0.0..=100.0, 0).changed() {
+            brush.min_size = min_size_percent / 100.0;
         }
-        ui.checkbox(&mut b.screen_space, tr("Size in screen space"));
-    });
-    section(ui, "sec_flow", tr("Flow and opacity"), true, |ui| {
-        let mut f = b.flow * 100.0;
-        if slider(ui, tr("Flow"), &mut f, 0.0..=100.0, 0).changed() {
-            b.flow = f / 100.0;
+
+        ui.checkbox(&mut brush.screen_space, tr("Size in screen space"));
+    }) {
+        (brush.size, brush.min_size, brush.screen_space) = size_fields(&defaults);
+    }
+
+    let flow_fields = |settings: &BrushSettings| (settings.flow, settings.opacity, settings.spacing, settings.hardness);
+    if section_with_reset(ui, "sec_flow", tr("Flow and opacity"), true, flow_fields(brush) == flow_fields(&defaults), |ui| {
+        let mut flow_percent = brush.flow * 100.0;
+        if slider(ui, tr("Flow"), &mut flow_percent, 0.0..=100.0, 0).changed() {
+            brush.flow = flow_percent / 100.0;
         }
-        let mut o = b.opacity * 100.0;
-        if slider(ui, tr("Stroke opacity"), &mut o, 0.0..=100.0, 0).changed() {
-            b.opacity = o / 100.0;
+
+        let mut opacity_percent = brush.opacity * 100.0;
+        if slider(ui, tr("Stroke opacity"), &mut opacity_percent, 0.0..=100.0, 0).changed() {
+            brush.opacity = opacity_percent / 100.0;
         }
-        let mut s = b.spacing * 100.0;
-        if slider(ui, tr("Spacing"), &mut s, 1.0..=1000.0, 0).changed() {
-            b.spacing = s / 100.0;
+
+        let mut spacing_percent = brush.spacing * 100.0;
+        if slider(ui, tr("Spacing"), &mut spacing_percent, 1.0..=1000.0, 0).changed() {
+            brush.spacing = spacing_percent / 100.0;
         }
-        let mut h = b.hardness * 100.0;
-        if slider(ui, tr("Hardness"), &mut h, 0.0..=99.9, 0).changed() {
-            b.hardness = h / 100.0;
+
+        let mut hardness_percent = brush.hardness * 100.0;
+        if slider(ui, tr("Hardness"), &mut hardness_percent, 0.0..=99.9, 0).changed() {
+            brush.hardness = hardness_percent / 100.0;
         }
-    });
-    section(ui, "sec_angle", tr("Angle"), false, |ui| {
-        slider(ui, tr("Angle"), &mut b.angle, -180.0..=180.0, 0);
-        ui.checkbox(&mut b.follow_path, tr("Follow path"));
-    });
-    section(ui, "sec_jitter", tr("Jitters"), false, |ui| {
-        for (label, v) in [(tr("Size jitter"), &mut b.jitter_size), (tr("Angle jitter"), &mut b.jitter_angle), (tr("Flow jitter"), &mut b.jitter_flow)] {
-            let mut x = *v * 100.0;
-            if slider(ui, label, &mut x, 0.0..=100.0, 0).changed() {
-                *v = x / 100.0;
+    }) {
+        (brush.flow, brush.opacity, brush.spacing, brush.hardness) = flow_fields(&defaults);
+    }
+
+    let angle_fields = |settings: &BrushSettings| (settings.angle, settings.follow_path);
+    if section_with_reset(ui, "sec_angle", tr("Angle"), false, angle_fields(brush) == angle_fields(&defaults), |ui| {
+        slider(ui, tr("Angle"), &mut brush.angle, -180.0..=180.0, 0);
+        ui.checkbox(&mut brush.follow_path, tr("Follow path"));
+    }) {
+        (brush.angle, brush.follow_path) = angle_fields(&defaults);
+    }
+
+    let jitter_fields = |settings: &BrushSettings| (settings.jitter_size, settings.jitter_angle, settings.jitter_flow, settings.jitter_position);
+    if section_with_reset(ui, "sec_jitter", tr("Jitters"), false, jitter_fields(brush) == jitter_fields(&defaults), |ui| {
+        let jitters = [(tr("Size jitter"), &mut brush.jitter_size), (tr("Angle jitter"), &mut brush.jitter_angle), (tr("Flow jitter"), &mut brush.jitter_flow)];
+        for (label, jitter) in jitters {
+            let mut jitter_percent = *jitter * 100.0;
+            if slider(ui, label, &mut jitter_percent, 0.0..=100.0, 0).changed() {
+                *jitter = jitter_percent / 100.0;
             }
         }
-        let mut pj = b.jitter_position * 100.0;
-        if slider(ui, tr("Position jitter"), &mut pj, 0.0..=400.0, 0).changed() {
-            b.jitter_position = pj / 100.0;
+
+        let mut position_jitter_percent = brush.jitter_position * 100.0;
+        if slider(ui, tr("Position jitter"), &mut position_jitter_percent, 0.0..=400.0, 0).changed() {
+            brush.jitter_position = position_jitter_percent / 100.0;
         }
-    });
-    section(ui, "sec_align", tr("Alignment and culling"), false, |ui| {
+    }) {
+        (brush.jitter_size, brush.jitter_angle, brush.jitter_flow, brush.jitter_position) = jitter_fields(&defaults);
+    }
+
+    let alignment_fields = |settings: &BrushSettings| (settings.alignment, settings.backface_culling, settings.angle_fade, settings.depth);
+    if section_with_reset(ui, "sec_align", tr("Alignment and culling"), false, alignment_fields(brush) == alignment_fields(&defaults), |ui| {
         use texturecraft_engine::paint::Alignment;
         let alignments = [(Alignment::Tangent, tr("Tangent | Wrap")), (Alignment::Camera, tr("Camera"))];
-        let shown = alignments.iter().find(|(a, _)| *a == b.alignment).map_or("", |(_, l)| l);
+        let shown = alignments.iter().find(|(alignment, _)| *alignment == brush.alignment).map_or("", |(_, label)| label);
         combo(ui, tr("Alignment"), shown, |ui| {
-            for (a, l) in alignments {
-                ui.selectable_value(&mut b.alignment, a, l);
+            for (alignment, label) in alignments {
+                ui.selectable_value(&mut brush.alignment, alignment, label);
             }
         });
-        ui.checkbox(&mut b.backface_culling, tr("Backface culling"));
-        slider(ui, tr("Angle fade from"), &mut b.angle_fade.0, 0.0..=90.0, 0);
-        slider(ui, tr("Angle fade to"), &mut b.angle_fade.1, 0.0..=90.0, 0);
-        slider(ui, tr("Stamp depth"), &mut b.depth, 0.05..=4.0, 2);
-    });
-    section(ui, "sec_particles", tr("Particles"), false, |ui| {
-        let pt = &mut b.particles;
-        ui.checkbox(&mut pt.enabled, tr("Particle brush (slides down the surface)"));
-        let mut count = pt.count as f32;
+
+        ui.checkbox(&mut brush.backface_culling, tr("Backface culling"));
+        slider(ui, tr("Angle fade from"), &mut brush.angle_fade.0, 0.0..=90.0, 0);
+        slider(ui, tr("Angle fade to"), &mut brush.angle_fade.1, 0.0..=90.0, 0);
+        slider(ui, tr("Stamp depth"), &mut brush.depth, 0.05..=4.0, 2);
+    }) {
+        (brush.alignment, brush.backface_culling, brush.angle_fade, brush.depth) = alignment_fields(&defaults);
+    }
+
+    if section_with_reset(ui, "sec_particles", tr("Particles"), false, brush.particles == defaults.particles, |ui| {
+        let particles = &mut brush.particles;
+        ui.checkbox(&mut particles.enabled, tr("Particle brush (slides down the surface)"));
+
+        let mut count = particles.count as f32;
         if slider(ui, tr("Count per stamp"), &mut count, 1.0..=16.0, 0).changed() {
-            pt.count = count as u32;
+            particles.count = count as u32;
         }
-        let mut life = pt.lifetime as f32;
-        if slider(ui, tr("Lifetime (steps)"), &mut life, 1.0..=128.0, 0).changed() {
-            pt.lifetime = life as u32;
+
+        let mut lifetime_steps = particles.lifetime as f32;
+        if slider(ui, tr("Lifetime (steps)"), &mut lifetime_steps, 1.0..=128.0, 0).changed() {
+            particles.lifetime = lifetime_steps as u32;
         }
-        slider(ui, tr("Gravity"), &mut pt.gravity, 0.0..=2.0, 2);
-    });
-    section(ui, "sec_lazy", tr("Lazy mouse and symmetry"), false, |ui| {
-        slider(ui, tr("Lazy mouse distance"), &mut b.lazy, 0.0..=200.0, 0);
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut b.symmetry.x, tr("Mirror X"));
-            ui.checkbox(&mut b.symmetry.y, tr("Mirror Y"));
-            ui.checkbox(&mut b.symmetry.z, tr("Mirror Z"));
-        });
-        let mut copies = f32::from(b.symmetry.radial);
-        if slider(ui, tr("Radial copies"), &mut copies, 0.0..=32.0, 0).changed() {
-            b.symmetry.radial = copies as u8;
-        }
-        ui.add_enabled_ui(b.symmetry.radial > 1, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(tr("Radial axis"));
-                for (k, name) in ["X", "Y", "Z"].into_iter().enumerate() {
-                    ui.selectable_value(&mut b.symmetry.axis, k as u8, name);
-                }
-            });
-        });
-    });
-    *b = b.sanitized();
+
+        slider(ui, tr("Gravity"), &mut particles.gravity, 0.0..=2.0, 2);
+    }) {
+        brush.particles = defaults.particles;
+    }
+
+    if section_with_reset(ui, "sec_lazy", tr("Lazy mouse"), false, brush.lazy == defaults.lazy, |ui| {
+        slider(ui, tr("Lazy mouse distance"), &mut brush.lazy, 0.0..=200.0, 0);
+    }) {
+        brush.lazy = defaults.lazy;
+    }
+
+    *brush = brush.sanitized();
 }
 
 /// One alpha in the picker: a 52×64 tile with the shape drawn by `paint` and a label.
@@ -2215,23 +2244,7 @@ fn effect_properties(app: &mut TextureCraftApp, ui: &mut Ui, layer: &Layer, eid:
 
     match &effect.kind {
         EffectKind::Generator(generator) => generator_properties(app, ui, id, generator),
-        EffectKind::Levels(levels) => {
-            ui.label(caption(tr("Levels")));
-            levels_histogram(app, ui, layer, eid, (levels.in_low, levels.in_high));
-            let mut values = [levels.in_low, levels.in_high, levels.gamma, levels.out_low, levels.out_high];
-            let labels = [tr("Input low"), tr("Input high"), tr("Gamma"), tr("Output low"), tr("Output high")];
-            let mut edit = None;
-            for (index, label) in labels.iter().enumerate() {
-                let range = if index == 2 { 0.1..=5.0 } else { 0.0..=1.0 };
-                edit = edit.or(slider_edit(ui, label, &mut values[index], range, 2));
-            }
-            if let Some(merge) = edit {
-                app.run(
-                    "effect.set",
-                    json!({"effect": id, "inLow": values[0], "inHigh": values[1], "gamma": values[2], "outLow": values[3], "outHigh": values[4], "merge": merge}),
-                );
-            }
-        }
+        EffectKind::Levels(levels) => crate::levels_properties::levels_properties(app, ui, layer, eid, levels),
         EffectKind::Fill { source, .. } => {
             ui.label(caption(tr("Fill")));
             let anchors = anchors_below(app, layer.id);
@@ -2396,38 +2409,6 @@ fn curvature_mode_label(mode: CurvatureMode) -> &'static str {
         CurvatureMode::Cavities => tr("Cavities"),
         CurvatureMode::Both => tr("Edges and cavities"),
         CurvatureMode::Raw => tr("Raw curvature"),
-    }
-}
-
-/// The histogram of what levels effect `eid` of `layer` remaps (its mask, or a content channel
-/// picked here), with the input range marked. Recomputed after a document change once no
-/// pointer button is held, so dragging a slider keeps the last one.
-fn levels_histogram(app: &TextureCraftApp, ui: &mut Ui, layer: &Layer, eid: LayerId, range: (f32, f32)) {
-    let mut channel = layer.channels.keys().next().copied().unwrap_or(Channel::BaseColor);
-    if layer.content_effects.iter().any(|e| e.id == eid) {
-        let pick = egui::Id::unique(("levels_channel", eid.0));
-        let chans: Vec<Channel> = layer.channels.keys().copied().filter(|c| c.kind() != texturecraft_engine::core::ChannelKind::NormalMap).collect();
-        channel = ui.data(|d| d.get_temp(pick)).filter(|c| chans.contains(c)).or(chans.first().copied()).unwrap_or(channel);
-        combo(ui, tr("Channel"), tr(channel.label()), |ui| {
-            for c in chans {
-                if ui.selectable_label(c == channel, tr(c.label())).clicked() {
-                    ui.data_mut(|d| d.insert_temp(pick, c));
-                }
-            }
-        });
-    }
-    let key = egui::Id::unique(("levels_histogram", eid.0, channel));
-    let rev = app.session.revision;
-    let counts = match ui.data(|d| d.get_temp::<(u64, std::sync::Arc<Vec<u32>>)>(key)) {
-        Some((r, h)) if r == rev || ui.input(|i| i.pointer.any_down()) => Some(h),
-        _ => app.session.effect_histogram(eid, channel, 64).map(|h| {
-            let h = std::sync::Arc::new(h);
-            ui.data_mut(|d| d.insert_temp(key, (rev, h.clone())));
-            h
-        }),
-    };
-    if let Some(counts) = counts {
-        histogram(ui, &counts, range);
     }
 }
 

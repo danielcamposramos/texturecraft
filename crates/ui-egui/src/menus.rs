@@ -131,7 +131,7 @@ pub fn implemented(id: &str) -> bool {
     is_ui(id) || texturecraft_engine::find(id).is_some()
 }
 
-/// Invoke a menu item (menus, shortcuts, palette, control channel `ui.menu.invoke`).
+/// Invoke a menu item (menus, shortcuts, palette, control channel `ui.menu.invoke`)
 pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
     if !enabled(app, id) {
         return;
@@ -142,15 +142,21 @@ pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
     {
         return;
     }
+
     if let Some(panel) = crate::docking::view_panel(id) {
-        app.ui.dock.toggle(panel);
+        if crate::rail_popup::is_rail_panel(panel) {
+            crate::rail_popup::toggle(app, panel);
+        } else {
+            app.ui.dock.toggle(panel);
+        }
         return;
     }
+
     match id {
         "ui.newProject" => app.ui.windows.new_project = true,
         "ui.export" => app.ui.windows.export = true,
         "ui.quit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-        "ui.projectConfig" => app.ui.dock.focus(crate::docking::Panel::Display),
+        "ui.projectConfig" => crate::rail_popup::open(app, crate::docking::Panel::Display),
         "ui.settings" => app.ui.windows.settings = true,
         "ui.mode.bake" => app.ui.mode = Mode::Baking,
         "ui.mode.paint" => app.ui.mode = Mode::Painting,
@@ -316,14 +322,14 @@ pub fn shortcuts(app: &mut TextureCraftApp, ctx: &egui::Context) {
     if crate::keymap::capturing(ctx) || (ctx.memory(|memory| memory.focused().is_some()) && ctx.egui_wants_keyboard_input()) {
         return;
     }
+
     #[cfg(not(target_arch = "wasm32"))]
     if crate::updates_ui::blocks_input(app) {
         return;
     }
 
-    // The dispatcher reads Copy, Cut and Paste as their chords. A pasted image is Ctrl+V here, and
-    // Shift+Delete and Shift+Insert (Cut and Paste on Windows) are Ctrl+X and Ctrl+V unless
-    // something is bound to them.
+    // The dispatcher reads clipboard events as shortcuts; a pasted image also means Ctrl+V
+    // Unless bound, Shift+Delete and Shift+Insert become Ctrl+X and Ctrl+V
     ctx.input_mut(|input| {
         let held = input.modifiers;
         let aliases: Vec<_> = input
@@ -335,7 +341,7 @@ pub fn shortcuts(app: &mut TextureCraftApp, ctx: &egui::Context) {
         input.events.extend(aliases);
     });
 
-    // Escape closes an open popup first, before the Properties popup or the stroke
+    // Escape closes a dropdown before Properties, the rail popup, color picking or the stroke
     let popup_open = egui::Popup::is_any_open(ctx);
 
     let commands_to_invoke = ctx.input_mut(|input| {
@@ -359,12 +365,13 @@ pub fn shortcuts(app: &mut TextureCraftApp, ctx: &egui::Context) {
 
         if !popup_open && app.properties_popup.is_some() && input.consume_key(Modifiers::NONE, Key::Escape) {
             app.properties_popup = None;
+        } else if !popup_open && crate::rail_popup::is_visible(app) && input.consume_key(Modifiers::NONE, Key::Escape) {
+            app.ui.rail_panel = None;
         } else if !popup_open && app.picking_id_color.is_some() && input.consume_key(Modifiers::NONE, Key::Escape) {
             crate::id_color_pick::IdColorPick::end(app);
         } else if app.ui.mode == Mode::Painting && !popup_open && input.consume_key(Modifiers::NONE, Key::Escape) {
             app.session.cancel_stroke();
-            app.session.tool.path.points.clear();
-            app.session.tool.path.editing = None;
+            app.session.cancel_path();
         }
         commands
     });

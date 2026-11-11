@@ -34,6 +34,9 @@ fn red(v: [f32; 3]) -> bool {
     v[0] > 0.85 && v[1] < 0.15
 }
 
+/// Distance between the view points searched for a texture set
+const SEARCH_STEP: f32 = 10.0;
+
 fn png(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     let mut out = Vec::new();
     image::RgbaImage::from_fn(w, h, |x, y| image::Rgba(f(x, y))).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
@@ -343,6 +346,129 @@ fn decal_drags_merge_into_one_undo_step() {
         execute(&mut s, "edit.undo", &Value::Null).unwrap();
     }
     assert_eq!(execute(&mut s, "project.inspect", &Value::Null).unwrap()["layers"], start);
+}
+
+/// A decal dropped on another texture set lands there and selects it, in one undo step
+#[test]
+fn a_decal_on_another_texture_set_selects_that_set() {
+    let mut s = Session::new_project("t", primitives::material_ball(), "builtin:material_ball", None, 256).unwrap();
+    s.viewport = Vec2::new(400.0, 400.0);
+    s.update();
+    let name = s.import_resource_bytes("logo.png", png(8, 8, |_, _| [255, 0, 0, 255])).unwrap();
+    let selected = s.ts();
+    let (columns, rows) = ((s.viewport.x / SEARCH_STEP) as u32, (s.viewport.y / SEARCH_STEP) as u32);
+    let other_set_pixel = (0..rows)
+        .flat_map(|row| (0..columns).map(move |column| Vec2::new(column as f32, row as f32) * SEARCH_STEP))
+        .find(|&pixel| s.texture_set_at(pixel, s.viewport).is_some_and(|ts| ts != selected))
+        .expect("the material ball shows both of its texture sets");
+    let other = s.texture_set_at(other_set_pixel, s.viewport).unwrap();
+    let steps = s.history_labels().len();
+
+    let drop = json!({"image": name, "x": other_set_pixel.x, "y": other_set_pixel.y, "viewport": [s.viewport.x, s.viewport.y]});
+    let layer = id(execute(&mut s, "layer.add.decal", &drop).unwrap(), "layer");
+
+    assert_eq!(s.ts(), other, "the set under the point is selected");
+    assert_eq!(s.doc.project.locate(layer).map(|(ts, _, _)| ts), Some(other), "the decal is in that set");
+    assert_eq!(s.selected_layer(), Some(layer));
+    assert_eq!(s.history_labels().len(), steps + 1, "one undo step");
+
+    execute(&mut s, "edit.undo", &Value::Null).unwrap();
+    assert!(s.doc.project.locate(layer).is_none(), "one undo takes the decal away");
+
+    let background = json!({"image": name, "x": 2, "y": 2, "viewport": [s.viewport.x, s.viewport.y]});
+    assert!(s.texture_set_at(Vec2::new(2.0, 2.0), s.viewport).is_none());
+    assert!(execute(&mut s, "layer.add.decal", &background).is_err(), "the background still takes nothing");
+}
+
+/// A decal's image goes in the channel asked for, or masks a new fill layer
+#[test]
+fn a_decal_image_fills_a_chosen_channel_or_a_mask() {
+    let mut s = session();
+    let name = s.import_resource_bytes("logo.png", png(8, 8, |_, _| [255, 255, 255, 255])).unwrap();
+    let place = |channel: &str| json!({"image": name, "channel": channel, "x": 200, "y": 200, "size": 0.5});
+
+    let rough = id(execute(&mut s, "layer.add.decal", &place("roughness")).unwrap(), "layer");
+    assert_eq!(s.doc.project.layer(rough).unwrap().channels.keys().copied().collect::<Vec<_>>(), [Channel::Roughness]);
+    assert!(at(&mut s, Channel::Roughness, 200.0, 200.0)[0] > 0.95, "the white image is full roughness under the decal");
+    assert!(execute(&mut s, "layer.add.decal", &place("sparkle")).is_err(), "unknown channel");
+    let missing = Channel::ALL.into_iter().find(|channel| !s.doc.project.texture_sets[0].has_channel(*channel)).unwrap();
+    assert!(execute(&mut s, "layer.add.decal", &place(missing.id())).is_err(), "a channel the set lacks");
+
+    let added = execute(&mut s, "layer.add.decal", &place("mask")).unwrap();
+    let masked = id(added.clone(), "layer");
+    let mask = s.doc.project.layer(masked).unwrap().mask.as_ref().unwrap();
+    assert!(matches!(mask.effects.as_slice(), [effect] if matches!(effect.kind, EffectKind::Fill { projection: Projection::Decal(_), .. })));
+    assert_eq!(added["maskEffect"], json!(mask.effects[0].id.0));
+    execute(&mut s, "layer.fill.set", &json!({"layer": masked.0, "channel": "baseColor", "color": [1.0, 0.0, 0.0]})).unwrap();
+    assert!(red(at(&mut s, Channel::BaseColor, 200.0, 200.0)), "the mask shows the layer under the decal");
+    assert!(!red(at(&mut s, Channel::BaseColor, 120.0, 200.0)), "and hides it elsewhere");
+
+    let effect = &added["maskEffect"];
+    execute(&mut s, "layer.decal.set", &json!({"effect": effect, "x": 150, "y": 200})).unwrap();
+    assert!(red(at(&mut s, Channel::BaseColor, 150.0, 200.0)), "a mask decal moves like a decal layer");
+    assert!(!red(at(&mut s, Channel::BaseColor, 230.0, 200.0)));
+    assert!(execute(&mut s, "layer.decal.set", &json!({"effect": rough.0, "x": 150, "y": 200})).is_err(), "a layer id is not an effect");
+    execute(&mut s, "layer.decal.set", &json!({"effect": effect, "layer": masked.0, "size": 0.4})).expect("an effect with its own layer");
+    let mismatched = json!({"effect": effect, "layer": rough.0, "size": 0.4});
+    assert!(execute(&mut s, "layer.decal.set", &mismatched).is_err(), "an effect with another layer is refused");
+}
+
+#[test]
+fn editing_a_decal_checks_its_own_texture_set_after_selection_changes() {
+    for channel in ["baseColor", "mask"] {
+        let mut session = Session::new_project("t", primitives::material_ball(), "builtin:material_ball", None, 256).unwrap();
+        session.viewport = Vec2::new(400.0, 400.0);
+        session.update();
+        let image = session.import_resource_bytes("logo.png", png(8, 8, |_, _| [255; 4])).unwrap();
+        let (columns, rows) = ((session.viewport.x / SEARCH_STEP) as u32, (session.viewport.y / SEARCH_STEP) as u32);
+        let point_on = |texture_set| {
+            (0..rows)
+                .flat_map(|row| (0..columns).map(move |column| Vec2::new(column as f32, row as f32) * SEARCH_STEP))
+                .find(|&point| session.texture_set_at(point, session.viewport) == Some(texture_set))
+                .expect("both material-ball sets are visible")
+        };
+        let original_point = point_on(0);
+        let other_point = point_on(1);
+        let added =
+            execute(&mut session, "layer.add.decal", &json!({"image": image, "channel": channel, "x": original_point.x, "y": original_point.y})).unwrap();
+        let layer = added["layer"].clone();
+        let effect = added["maskEffect"].clone();
+        execute(&mut session, "textureSet.select", &json!({"ts": 1})).unwrap();
+        execute(&mut session, "layer.add.paint", &Value::Null).unwrap();
+        let before = serde_json::to_value(&session.doc.project).unwrap();
+        let history = session.history_labels();
+
+        let rejected = execute(&mut session, "layer.decal.set", &json!({"layer": layer, "effect": effect, "x": other_point.x, "y": other_point.y}));
+
+        assert!(rejected.is_err(), "{channel}: selecting another set must not allow moving the decal onto that set");
+        assert_eq!(serde_json::to_value(&session.doc.project).unwrap(), before);
+        assert_eq!(session.history_labels(), history);
+
+        let replaced = execute(&mut session, "layer.decal.set", &json!({"layer": layer, "effect": effect, "x": original_point.x, "y": original_point.y}));
+
+        assert!(replaced.is_ok(), "{channel}: the decal's own set remains a valid placement: {replaced:?}");
+        let decal = replaced.unwrap()["decal"].clone();
+
+        execute(&mut session, "layer.decal.set", &json!({"layer": layer, "effect": effect, "position": decal["center"], "normal": decal["normal"]})).unwrap();
+
+        assert_eq!(session.ts(), 1, "editing an explicit decal does not change selection");
+    }
+}
+
+/// A decal's new image stays in the channel the decal was placed in, read as gray there
+#[test]
+fn a_channel_decal_reads_its_image_as_gray_and_keeps_its_channel() {
+    let mut s = session();
+    let white = s.import_resource_bytes("white.png", png(8, 8, |_, _| [255, 255, 255, 255])).unwrap();
+    let green = s.import_resource_bytes("green.png", png(8, 8, |_, _| [0, 255, 0, 255])).unwrap();
+    let place = json!({"image": white, "channel": "roughness", "x": 200, "y": 200, "size": 0.5});
+    let layer = id(execute(&mut s, "layer.add.decal", &place).unwrap(), "layer");
+
+    execute(&mut s, "layer.decal.set", &json!({"layer": layer.0, "image": green})).unwrap();
+
+    assert_eq!(s.doc.project.layer(layer).unwrap().channels.keys().copied().collect::<Vec<_>>(), [Channel::Roughness]);
+    let roughness = at(&mut s, Channel::Roughness, 200.0, 200.0)[0];
+    assert!((roughness - texturecraft_engine::core::lum([0.0, 1.0, 0.0])).abs() < 0.02, "green reads as its gray, not its red: {roughness}");
 }
 
 /// The Geometry mask tool: a click toggles the selected layer on the part under it.

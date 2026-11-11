@@ -37,6 +37,7 @@ pub mod meshmap_import_cmds;
 mod orb_camera;
 pub mod orb_preview;
 pub mod painting;
+mod path_draft;
 pub mod path_tool;
 mod polygon_fill;
 mod polygon_fill_drag;

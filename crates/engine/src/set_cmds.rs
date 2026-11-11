@@ -75,12 +75,27 @@ pub(crate) fn ts_param(s: &Session, p: &Value, cmd: &str) -> Result<usize> {
 }
 
 fn select(s: &mut Session, p: &Value) -> Result<Value> {
-    let ts = u64p(p, "ts").map(|t| t as usize).filter(|t| *t < s.set_count()).ok_or_else(|| bad("textureSet.select", "valid `ts` index required"))?;
+    let ts = u64p(p, "ts")
+        .map(|index| index as usize)
+        .filter(|index| *index < s.set_count())
+        .ok_or_else(|| bad("textureSet.select", "valid `ts` index required"))?;
+    select_set(s, ts)?;
+    Ok(json!({ "ts": ts }))
+}
+
+/// Make texture set `ts` the active one, on its content stack
+pub(crate) fn select_set(s: &mut Session, ts: usize) -> Result<()> {
     s.cancel_stroke();
+
+    // Paths paint into the active set
+    if ts != s.ts() {
+        s.finish_path()?;
+    }
+
     s.active_set = ts;
     s.target = StackTarget::Content;
     s.revision = s.revision.wrapping_add(1);
-    Ok(json!({ "ts": ts }))
+    Ok(())
 }
 
 fn resolution(s: &mut Session, p: &Value) -> Result<Value> {

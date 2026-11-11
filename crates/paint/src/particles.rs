@@ -97,7 +97,7 @@ mod tests {
             hardness: 0.5,
             depth: 1.0,
             seed: 3,
-            copy: false,
+            source: None,
         };
         let particles = Particles { enabled: true, count: 4, lifetime: 20, gravity: 1.0 };
 

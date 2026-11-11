@@ -1,11 +1,12 @@
 //! From pointer samples to stamps: picking, lazy mouse, spacing along the surface, stamp
 //! frames, jitter and symmetry.
 
-use texturecraft_geom::glam::{Quat, Vec2, Vec3};
+use texturecraft_geom::glam::{Mat3, Quat, Vec2, Vec3};
 use texturecraft_geom::{Bvh, Mesh, OrbitCamera, surface_at};
 use texturecraft_texel::noise::pcg3d;
 
 use crate::brush::{Alignment, BrushSettings};
+use crate::stamp_source::StampSource;
 
 /// Scene access for picking.
 pub struct PickCtx<'a> {
@@ -37,7 +38,20 @@ pub fn pick(ctx: &PickCtx, screen: Vec2) -> Option<SurfaceHit> {
     Some(SurfaceHit { pos: s.pos, nrm: s.nrm, tri: hit.tri, uv: s.uv, material: ctx.mesh.material_of(hit.tri as usize).unwrap_or(0), screen })
 }
 
-/// One brush dab in world space.
+/// Random channels of a stamp's jitters (each draws its own number from the stamp's seed)
+const JITTER_ANGLE: u32 = 1;
+const JITTER_SIZE: u32 = 2;
+const JITTER_ACROSS: u32 = 3;
+const JITTER_ALONG: u32 = 4;
+const JITTER_FLOW: u32 = 5;
+
+/// Full angle jitter turns a stamp this far either way (degrees)
+const HALF_TURN_DEGREES: f32 = 180.0;
+
+/// Smallest size jitter leaves a stamp, as a fraction of its radius
+const MIN_JITTERED_SIZE: f32 = 0.05;
+
+/// One brush dab in world space
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stamp {
     pub center: Vec3,
@@ -47,12 +61,12 @@ pub struct Stamp {
     pub radius: f32,
     pub flow: f32,
     pub hardness: f32,
-    /// Half-depth of the stamp volume relative to the radius.
+    /// Half-depth of the stamp volume relative to the radius
     pub depth: f32,
-    /// Varies procedural alphas per stamp.
+    /// Varies procedural alphas per stamp
     pub seed: u32,
-    /// A symmetry copy: it paints where symmetry puts it, whether the camera sees that or not.
-    pub copy: bool,
+    /// A symmetry copy's way back to its source: it paints where the source would, mirrored
+    pub source: Option<StampSource>,
 }
 
 /// An in-progress stroke.
@@ -168,66 +182,87 @@ impl Stroke {
         self.last = Some(hit);
     }
 
+    /// The next stamp at `hit`: oriented to the surface or the camera, then jittered
     fn stamp(&mut self, ctx: &PickCtx, hit: &SurfaceHit, radius: f32) -> Stamp {
-        let s = &self.settings;
-        let n = self.count;
+        let settings = &self.settings;
+        let seed = self.count;
         self.count = self.count.wrapping_add(1);
-        let jitter = |k: u32, amount: f32| if amount > 0.0 { (rand01(n, k) * 2.0 - 1.0) * amount } else { 0.0 };
-        let normal = match s.alignment {
+        let jitter = |channel: u32, amount: f32| if amount > 0.0 { (rand01(seed, channel) * 2.0 - 1.0) * amount } else { 0.0 };
+
+        // Frame: the normal, and an up direction from the camera or the stroke's path
+        let normal = match settings.alignment {
             Alignment::Tangent => hit.nrm,
             Alignment::Camera => -ctx.camera.forward(),
         };
-        let cam_up = {
-            let f = ctx.camera.forward();
-            let right = f.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
-            right.cross(f)
+        let camera_up = {
+            let forward = ctx.camera.forward();
+            let right = forward.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+            right.cross(forward)
         };
-        let up_src = if s.follow_path { self.last_dir.unwrap_or(cam_up) } else { cam_up };
-        let up = (up_src - normal * normal.dot(up_src)).try_normalize().unwrap_or_else(|| normal.any_orthonormal_vector());
-        let tangent0 = up.cross(normal).try_normalize().unwrap_or_else(|| normal.any_orthonormal_vector());
-        let angle = (s.angle + jitter(1, s.jitter_angle) * 180.0).to_radians();
-        let q = Quat::from_axis_angle(normal, angle);
-        let tangent = q * tangent0;
+        let up_source = if settings.follow_path { self.last_dir.unwrap_or(camera_up) } else { camera_up };
+        let up = (up_source - normal * normal.dot(up_source)).try_normalize().unwrap_or_else(|| normal.any_orthonormal_vector());
+        let unturned_tangent = up.cross(normal).try_normalize().unwrap_or_else(|| normal.any_orthonormal_vector());
+
+        // Jitter: angle, size, position and flow
+        let angle = (settings.angle + jitter(JITTER_ANGLE, settings.jitter_angle) * HALF_TURN_DEGREES).to_radians();
+        let turn = Quat::from_axis_angle(normal, angle);
+        let tangent = turn * unturned_tangent;
         let bitangent = normal.cross(tangent);
-        let r = radius * (1.0 + jitter(2, s.jitter_size)).max(0.05);
-        let offset = (tangent * jitter(3, 1.0) + bitangent * jitter(4, 1.0)) * s.jitter_position * radius;
-        let flow = (s.flow * (1.0 - jitter(5, s.jitter_flow).abs())).clamp(0.0, 1.0);
-        Stamp { center: hit.pos + offset, normal, tangent, bitangent, radius: r, flow, hardness: s.hardness, depth: s.depth, seed: n, copy: false }
+        let jittered_radius = radius * (1.0 + jitter(JITTER_SIZE, settings.jitter_size)).max(MIN_JITTERED_SIZE);
+        let offset = (tangent * jitter(JITTER_ACROSS, 1.0) + bitangent * jitter(JITTER_ALONG, 1.0)) * settings.jitter_position * radius;
+        let flow = (settings.flow * (1.0 - jitter(JITTER_FLOW, settings.jitter_flow).abs())).clamp(0.0, 1.0);
+
+        Stamp {
+            center: hit.pos + offset,
+            normal,
+            tangent,
+            bitangent,
+            radius: jittered_radius,
+            flow,
+            hardness: settings.hardness,
+            depth: settings.depth,
+            seed,
+            source: None,
+        }
     }
 
-    /// Mirror copies of a stamp for the enabled symmetry axes, then radial copies of it and
-    /// its mirrors.
-    fn mirrors(&self, s: &Stamp) -> Vec<Stamp> {
-        let sym = self.settings.symmetry;
-        if !sym.any() {
+    /// Mirror copies of a stamp for the enabled symmetry axes, then radial copies of it and its mirrors
+    fn mirrors(&self, stamp: &Stamp) -> Vec<Stamp> {
+        let symmetry = self.settings.symmetry;
+        if !symmetry.any() {
             return Vec::new();
         }
 
-        let mut out = Vec::new();
-        for sign in sym.mirror_signs().skip(1) {
-            let normal = s.normal * sign;
-            let tangent = s.tangent * sign;
-            out.push(Stamp { center: self.center + (s.center - self.center) * sign, normal, tangent, bitangent: normal.cross(tangent), copy: true, ..*s });
+        let origin = symmetry.origin(self.center);
+        let mut copies = Vec::new();
+        let mut maps = Vec::new();
+        for sign in symmetry.mirror_signs().skip(1) {
+            let normal = stamp.normal * sign;
+            let tangent = stamp.tangent * sign;
+            let map = Mat3::from_diagonal(sign);
+            let source = Some(StampSource { origin, to_source: map.transpose() });
+            copies.push(Stamp { center: origin + (stamp.center - origin) * sign, normal, tangent, bitangent: normal.cross(tangent), source, ..*stamp });
+            maps.push(map);
         }
 
-        if sym.radial > 1 {
-            let axis = [Vec3::X, Vec3::Y, Vec3::Z].get(sym.axis as usize).copied().unwrap_or(Vec3::Y);
-            let base: Vec<Stamp> = std::iter::once(*s).chain(out.iter().copied()).collect();
+        if symmetry.radial_on() {
+            let axis = symmetry.radial_axis();
+            let to_turn: Vec<(Stamp, Mat3)> = std::iter::once((*stamp, Mat3::IDENTITY)).chain(copies.iter().copied().zip(maps)).collect();
 
-            for k in 1..sym.radial {
-                let q = Quat::from_axis_angle(axis, f32::from(k) * std::f32::consts::TAU / f32::from(sym.radial));
-                out.extend(base.iter().map(|b| Stamp {
-                    center: self.center + q * (b.center - self.center),
-                    normal: q * b.normal,
-                    tangent: q * b.tangent,
-                    bitangent: q * b.bitangent,
-                    copy: true,
-                    ..*b
+            for copy in 1..symmetry.radial {
+                let turn = Quat::from_axis_angle(axis, symmetry.radial_angle(copy));
+                copies.extend(to_turn.iter().map(|(base, map)| Stamp {
+                    center: origin + turn * (base.center - origin),
+                    normal: turn * base.normal,
+                    tangent: turn * base.tangent,
+                    bitangent: turn * base.bitangent,
+                    source: Some(StampSource { origin, to_source: (Mat3::from_quat(turn) * *map).transpose() }),
+                    ..*base
                 }));
             }
         }
 
-        out
+        copies
     }
 
     pub fn last_hit(&self) -> Option<SurfaceHit> {
@@ -294,6 +329,61 @@ mod tests {
         st.symmetry.z = true;
         let mut s = Stroke::new(&st, &m);
         assert_eq!(s.add(&ctx, Vec2::new(250.0, 180.0), 1.0).len(), 8);
+    }
+
+    #[test]
+    fn symmetry_mirrors_about_the_moved_plane() {
+        let (mesh, bvh, camera) = ctx_parts();
+        let ctx = PickCtx { mesh: &mesh, bvh: &bvh, camera: &camera, viewport: Vec2::new(400.0, 400.0) };
+        let mut settings = BrushSettings::default();
+        settings.symmetry.x = true;
+        settings.symmetry.offset = [0.25, 0.0, 0.0];
+        let mut stroke = Stroke::new(&settings, &mesh);
+        let stamps = stroke.add(&ctx, Vec2::new(250.0, 200.0), 1.0);
+        assert_eq!(stamps.len(), 2, "one stamp and its copy");
+        let (painted, copy) = (stamps[0], stamps[1]);
+
+        // Mirrored about x = 0.25 instead of the mesh center (x = 0)
+        assert!((painted.center.x + copy.center.x - 0.5).abs() < 1e-4, "{} {}", painted.center, copy.center);
+        assert!((painted.center.y - copy.center.y).abs() < 1e-4 && (painted.center.z - copy.center.z).abs() < 1e-4);
+    }
+
+    #[test]
+    fn default_symmetry_copies_match_the_mesh_centered_formula_bit_for_bit() {
+        let (mesh, bvh, camera) = ctx_parts();
+        let ctx = PickCtx { mesh: &mesh, bvh: &bvh, camera: &camera, viewport: Vec2::new(400.0, 400.0) };
+        let mut settings = BrushSettings::default();
+        settings.symmetry = crate::brush::Symmetry { x: true, y: true, radial: 3, axis: 1, ..settings.symmetry };
+        let mut stroke = Stroke::new(&settings, &mesh);
+        let stamps = stroke.add(&ctx, Vec2::new(250.0, 180.0), 1.0);
+
+        // Copies as painting computed them before the plane could move: mirrors, then radial turns of each
+        let (lo, hi) = mesh.bounds();
+        let center = (lo + hi) * 0.5;
+        let source = stamps[0].center;
+        let mirrored = [Vec3::new(-1.0, 1.0, 1.0), Vec3::new(1.0, -1.0, 1.0), Vec3::new(-1.0, -1.0, 1.0)].map(|sign| center + (source - center) * sign);
+        let to_turn: Vec<Vec3> = std::iter::once(source).chain(mirrored).collect();
+        let turned = (1..3u8).flat_map(|copy| {
+            let turn = Quat::from_axis_angle(Vec3::Y, f32::from(copy) * std::f32::consts::TAU / 3.0);
+            to_turn.iter().map(move |point| center + turn * (*point - center)).collect::<Vec<_>>()
+        });
+        let expected: Vec<Vec3> = mirrored.into_iter().chain(turned).collect();
+
+        let copies: Vec<Vec3> = stamps[1..].iter().map(|stamp| stamp.center).collect();
+        assert_eq!(copies, expected);
+    }
+
+    #[test]
+    fn a_zero_angle_span_paints_no_radial_copies() {
+        let (mesh, bvh, camera) = ctx_parts();
+        let ctx = PickCtx { mesh: &mesh, bvh: &bvh, camera: &camera, viewport: Vec2::new(400.0, 400.0) };
+        let mut settings = BrushSettings::default();
+        settings.symmetry.radial = 6;
+        settings.symmetry.angle_span = 0.0;
+        let mut stroke = Stroke::new(&settings, &mesh);
+
+        // Six copies with no angle between them would all paint over the stroke
+        assert_eq!(stroke.add(&ctx, Vec2::new(250.0, 180.0), 1.0).len(), 1);
     }
 
     #[test]

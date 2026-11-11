@@ -82,6 +82,28 @@ impl StrokeCanvas {
     }
 }
 
+/// Most a texel's eye distance may exceed the nearest surface in its 3×3 pixel neighbourhood, in pixels along the surface
+const NEIGHBOUR_REACH: f32 = 1.5;
+
+/// Facing (cosine) below which the allowance stops growing
+const MIN_FACING: f32 = 0.05;
+
+/// Height of the view in normalized device coordinates (−1 to 1)
+const NDC_HEIGHT: f32 = 2.0;
+
+/// How far toward the eye to test a texel turned `facing` away: at grazing angles the neighbouring pixels of the same surface are much nearer, and the depth test would speckle
+fn grazing_allowance(depth: &EyeDepth, point: Vec3, facing: f32, pixels_per_unit: f32) -> f32 {
+    // Back faces get none, so painting with culling off doesn't reach through thin parts
+    if facing <= 0.0 {
+        return 0.0;
+    }
+
+    let clip_w = (depth.view_proj * point.extend(1.0)).w.max(0.0);
+    let world_per_pixel = clip_w * NDC_HEIGHT / pixels_per_unit;
+    let facing = facing.clamp(MIN_FACING, 1.0);
+    world_per_pixel * NEIGHBOUR_REACH * (1.0 - facing * facing).sqrt() / facing
+}
+
 /// What the rasterizer reads.
 pub struct RasterCtx<'a> {
     pub mesh: &'a Mesh,
@@ -103,28 +125,37 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 /// Accumulate `stamps` into `canvas` ("over": `m = a + m·(1 − a)`).
-pub fn rasterize(canvas: &mut StrokeCanvas, ctx: &RasterCtx, stamps: &[Stamp]) {
-    let (w, h) = (ctx.gbuf.width, ctx.gbuf.height);
-    canvas.fit(ctx.gbuf);
-    let fade_lo = ctx.angle_fade.1.to_radians().cos();
-    let fade_hi = ctx.angle_fade.0.to_radians().cos();
-    let mut tris = Vec::new();
-    for s in stamps {
-        if s.radius.is_nan() || s.radius <= 0.0 || !s.center.is_finite() {
+pub fn rasterize(canvas: &mut StrokeCanvas, context: &RasterCtx, stamps: &[Stamp]) {
+    let (width, height) = (context.gbuf.width, context.gbuf.height);
+    canvas.fit(context.gbuf);
+    let fade_lo = context.angle_fade.1.to_radians().cos();
+    let fade_hi = context.angle_fade.0.to_radians().cos();
+
+    // The camera scale is shared by every candidate texel in this batch
+    let pixels_per_unit = context.depth.map_or(1.0, |depth| {
+        let ndc_per_unit = depth.view_proj.row(1).truncate().length();
+        (depth.height as f32 * ndc_per_unit).max(f32::EPSILON)
+    });
+    let mut triangles = Vec::new();
+    for stamp in stamps {
+        if stamp.radius.is_nan() || stamp.radius <= 0.0 || !stamp.center.is_finite() {
             continue;
         }
-        let ext = Vec3::splat(s.radius * s.depth.max(1.0) * 1.42);
-        tris.clear();
-        ctx.bvh.query_box(s.center - ext, s.center + ext, |t| tris.push(t));
-        // Each texel belongs to one triangle, so triangles scan independently (in parallel for
-        // large stamps); stamp alphas combine commutatively, so the order does not matter.
-        let scan = |&t: &u32| scan_triangle(ctx, s, t, w, h, fade_lo, fade_hi);
-        let parts: Vec<TriTexels> = if tris.len() > 16 { tris.par_iter().filter_map(scan).collect() } else { tris.iter().filter_map(scan).collect() };
-        // The stamp center in texels: the footprint texel nearest to it on the surface.
+
+        let extent = Vec3::splat(stamp.radius * stamp.depth.max(1.0) * 1.42);
+        triangles.clear();
+        context.bvh.query_box(stamp.center - extent, stamp.center + extent, |triangle| triangles.push(triangle));
+
+        // Each texel belongs to one triangle, so large stamps can scan triangles in parallel
+        let scan = |&triangle: &u32| scan_triangle(context, stamp, triangle, width, height, fade_lo, fade_hi, pixels_per_unit);
+        let parts: Vec<TriTexels> =
+            if triangles.len() > 16 { triangles.par_iter().filter_map(scan).collect() } else { triangles.iter().filter_map(scan).collect() };
+
+        // The footprint texel nearest the stamp center supplies the pickup's center
         let mut center = ([0.0f32; 2], f32::MAX);
-        for (texels, c) in parts {
-            if c.1 < center.1 {
-                center = c;
+        for (texels, nearest) in parts {
+            if nearest.1 < center.1 {
+                center = nearest;
             }
             canvas.texels.extend(texels);
         }
@@ -136,69 +167,91 @@ pub fn rasterize(canvas: &mut StrokeCanvas, ctx: &RasterCtx, stamps: &[Stamp]) {
 type TriTexels = (Vec<(u32, u32, f32)>, ([f32; 2], f32));
 
 #[allow(clippy::too_many_arguments)]
-fn scan_triangle(ctx: &RasterCtx, s: &Stamp, t: u32, w: u32, h: u32, fade_lo: f32, fade_hi: f32) -> Option<TriTexels> {
-    if ctx.mesh.material_of(t as usize) != Some(ctx.material) {
+fn scan_triangle(
+    context: &RasterCtx,
+    stamp: &Stamp,
+    triangle: u32,
+    width: u32,
+    height: u32,
+    fade_lo: f32,
+    fade_hi: f32,
+    pixels_per_unit: f32,
+) -> Option<TriTexels> {
+    if context.mesh.material_of(triangle as usize) != Some(context.material) {
         return None;
     }
-    let [a, b, c] = ctx.mesh.tri(t as usize)?;
-    let (ua, ub, uc) = (ctx.mesh.uvs.get(a)?, ctx.mesh.uvs.get(b)?, ctx.mesh.uvs.get(c)?);
-    let (pa, pb, pc) = (ctx.mesh.positions.get(a)?, ctx.mesh.positions.get(b)?, ctx.mesh.positions.get(c)?);
-    let (na, nb, nc) = (ctx.mesh.normals.get(a)?, ctx.mesh.normals.get(b)?, ctx.mesh.normals.get(c)?);
-    let x0 = (ua.x.min(ub.x).min(uc.x) * w as f32).floor().max(0.0) as u32;
-    let x1 = ((ua.x.max(ub.x).max(uc.x) * w as f32).ceil().max(0.0) as u32).min(w);
-    let y0 = (ua.y.min(ub.y).min(uc.y) * h as f32).floor().max(0.0) as u32;
-    let y1 = ((ua.y.max(ub.y).max(uc.y) * h as f32).ceil().max(0.0) as u32).min(h);
-    // Stamp radius in texels on this triangle: texel area over world area.
-    let uv_area = (*ub - *ua).perp_dot(*uc - *ua).abs() * w as f32 * h as f32;
-    let world_area = (*pb - *pa).cross(*pc - *pa).length();
-    let shape = ctx.shape.at_radius(s.radius * (uv_area / world_area).sqrt());
+
+    let [first, second, third] = context.mesh.tri(triangle as usize)?;
+    let (uv_a, uv_b, uv_c) = (context.mesh.uvs.get(first)?, context.mesh.uvs.get(second)?, context.mesh.uvs.get(third)?);
+    let (position_a, position_b, position_c) = (context.mesh.positions.get(first)?, context.mesh.positions.get(second)?, context.mesh.positions.get(third)?);
+    let (normal_a, normal_b, normal_c) = (context.mesh.normals.get(first)?, context.mesh.normals.get(second)?, context.mesh.normals.get(third)?);
+    let x0 = (uv_a.x.min(uv_b.x).min(uv_c.x) * width as f32).floor().max(0.0) as u32;
+    let x1 = ((uv_a.x.max(uv_b.x).max(uv_c.x) * width as f32).ceil().max(0.0) as u32).min(width);
+    let y0 = (uv_a.y.min(uv_b.y).min(uv_c.y) * height as f32).floor().max(0.0) as u32;
+    let y1 = ((uv_a.y.max(uv_b.y).max(uv_c.y) * height as f32).ceil().max(0.0) as u32).min(height);
+
+    // Stamp radius in texels on this triangle: texel area over world area
+    let uv_area = (*uv_b - *uv_a).perp_dot(*uv_c - *uv_a).abs() * width as f32 * height as f32;
+    let world_area = (*position_b - *position_a).cross(*position_c - *position_a).length();
+    let shape = context.shape.at_radius(stamp.radius * (uv_area / world_area).sqrt());
+
     let mut texels = Vec::new();
     let mut center = ([0.0f32; 2], f32::MAX);
+
     for y in y0..y1 {
         for x in x0..x1 {
-            let i = (y * w + x) as usize;
-            if ctx.gbuf.tri.get(i).copied().unwrap_or(NO_TRI) != t {
+            let texel = (y * width + x) as usize;
+            if context.gbuf.tri.get(texel).copied().unwrap_or(NO_TRI) != triangle {
                 continue;
             }
-            let Some([b1, b2]) = ctx.gbuf.bary.get(i).copied() else { continue };
+
+            let Some([b1, b2]) = context.gbuf.bary.get(texel).copied() else { continue };
             let b0 = 1.0 - b1 - b2;
-            let p = *pa * b0 + *pb * b1 + *pc * b2;
-            let d = p - s.center;
-            let lx = d.dot(s.tangent) / s.radius;
-            let ly = d.dot(s.bitangent) / s.radius;
-            if lx * lx + ly * ly > 2.0 {
+            let position = *position_a * b0 + *position_b * b1 + *position_c * b2;
+            let offset = position - stamp.center;
+            let local_x = offset.dot(stamp.tangent) / stamp.radius;
+            let local_y = offset.dot(stamp.bitangent) / stamp.radius;
+            if local_x * local_x + local_y * local_y > 2.0 {
                 continue;
             }
-            if d.dot(s.normal).abs() > s.radius * s.depth {
+
+            if offset.dot(stamp.normal).abs() > stamp.radius * stamp.depth {
                 continue;
             }
-            let dist = d.length_squared();
-            if dist < center.1 {
-                center = ([x as f32 + 0.5, y as f32 + 0.5], dist);
+
+            let distance_squared = offset.length_squared();
+            if distance_squared < center.1 {
+                center = ([x as f32 + 0.5, y as f32 + 0.5], distance_squared);
             }
-            let n = (*na * b0 + *nb * b1 + *nc * b2).try_normalize().unwrap_or(s.normal);
-            let to_eye = (ctx.eye - p).try_normalize().unwrap_or(n);
-            let facing = n.dot(to_eye);
-            // Symmetry copies paint where the camera may not see (the back of the model).
-            let culled = ctx.backface_culling && !s.copy;
-            if culled && facing <= 0.0 {
+
+            let normal = (*normal_a * b0 + *normal_b * b1 + *normal_c * b2).try_normalize().unwrap_or(stamp.normal);
+            if normal.dot(stamp.normal) <= 0.0 {
                 continue;
             }
-            if n.dot(s.normal) <= 0.0 {
+
+            // Allow half the stamp depth when the mirrored point is off an asymmetric surface
+            let (seen, seen_normal) = stamp.source.map_or((position, normal), |source| (source.point(position), source.direction(normal)));
+            let off_surface = if stamp.source.is_some() { stamp.radius * stamp.depth } else { 0.0 };
+            let to_eye = (context.eye - seen).try_normalize().unwrap_or(seen_normal);
+            let facing = seen_normal.dot(to_eye);
+            if context.backface_culling && facing <= 0.0 {
                 continue;
             }
-            if let Some(depth) = ctx.depth.filter(|_| !s.copy)
-                && !depth.visible(p)
+
+            if let Some(depth) = context.depth
+                && !depth.visible(seen + to_eye * (grazing_allowance(depth, seen, facing, pixels_per_unit) + off_surface))
             {
                 continue;
             }
-            let fade = if culled { smoothstep(fade_lo, fade_hi, facing) } else { 1.0 };
-            let a = shape.sample(lx, ly, s.hardness, s.seed) * s.flow * fade;
-            if a > 0.0 {
-                texels.push((x, y, a));
+
+            let fade = if context.backface_culling { smoothstep(fade_lo, fade_hi, facing) } else { 1.0 };
+            let alpha = shape.sample(local_x, local_y, stamp.hardness, stamp.seed) * stamp.flow * fade;
+            if alpha > 0.0 {
+                texels.push((x, y, alpha));
             }
         }
     }
+
     (center.1 < f32::MAX || !texels.is_empty()).then_some((texels, center))
 }
 
@@ -257,7 +310,7 @@ mod tests {
             hardness: 0.9,
             depth: 1.0,
             seed: 0,
-            copy: false,
+            source: None,
         };
         rasterize(&mut canvas, &ctx, &[st]);
         // Plane is 2 units over 128 texels: radius 0.25 = 16 texels around the center (64, 64).

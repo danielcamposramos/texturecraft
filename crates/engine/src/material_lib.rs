@@ -157,6 +157,7 @@ fn load(s: &mut Session, p: &Value) -> Result<Value> {
     let path = strp(p, "path").ok_or_else(|| bad("material.load", "`path` is required"))?;
     let bytes = texturecraft_formats::read_capped(std::path::Path::new(path), texturecraft_formats::mesh_import::MAX_MESH_FILE_BYTES)
         .map_err(|e| bad("material.load", format!("cannot read {path}: {e}")))?;
+
     let id = s.add_smart_material_bytes_at(&bytes, Place::from_params(p))?;
     Ok(json!({ "layer": id.0 }))
 }

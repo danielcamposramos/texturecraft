@@ -35,6 +35,7 @@ use crate::cage_gpu::CageGpu;
 use crate::gpu_trace::{Checked, checked};
 use crate::high_poly_gpu::HighPolyGpu;
 use crate::ibl;
+use crate::overlay_quad::OverlayQuad;
 use crate::set_highlight::SetHighlight;
 use crate::subdivide::{self, Vertex};
 use crate::uv_seam_gpu::UvSeamGpu;
@@ -289,6 +290,8 @@ pub struct Frame {
     pub shade: Shade,
     /// Visibility per texture set.
     pub visible: Vec<bool>,
+    /// See-through quads in the 3D view, hidden behind the mesh
+    pub overlay: Vec<OverlayQuad>,
 }
 
 struct Tex {
@@ -499,6 +502,9 @@ struct ViewTargets {
     behind: Option<Behind>,
     blit_buf: wgpu::Buffer,
     blit_bg: wgpu::BindGroup,
+    /// The frame's overlay triangles and how many vertices of the buffer they use
+    overlay: Option<wgpu::Buffer>,
+    overlay_vertices: u32,
     /// Set by [`Renderer::prepare`]: the view has content to blit.
     ready: bool,
 }
@@ -535,6 +541,7 @@ pub struct Renderer {
     uv_pipeline: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
     wire3d_pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
     /// The highlighted set's mesh edges, wider and in the highlight color
     highlight_pipeline: wgpu::RenderPipeline,
     /// Bake mode: the high poly, the cage's faces and wireframe, the low poly's UV seams
@@ -997,6 +1004,8 @@ impl Renderer {
         let uv_seam_pipeline =
             pipeline(device, "tc_uv_seam", &layout, &module, "vs_wire3d", &vertex_layout, hdr_target("fs_wire_uv_seam", blend), MSAA, wire3d_depth.clone());
         let bg_pipeline = pipeline(device, "tc_bg", &background_layout, &module, "vs_bg", &[], hdr_target("fs_bg", None), MSAA, always());
+        let overlay_pipeline =
+            pipeline(device, "tc_overlay", &background_layout, &module, "vs_overlay", &vertex_layout, hdr_target("fs_overlay", blend), MSAA, wire3d_depth);
         let blit_pipeline = pipeline(device, "tc_blit", &blit_layout, &util_module, "vs_blit", &[], Some(("fs_blit", target_format, None)), 1, None);
         let post_pipeline = pipeline(device, "tc_post", &effect_layout, &post_module, "vs_full", &[], Some(("fs_post", COLOR_FORMAT, None)), 1, None);
         let bloom_pipelines = [("fs_bloom_pre", None), ("fs_bloom_down", None), ("fs_bloom_up", Some(ADDITIVE))].map(|(fragment_entry_point, blend)| {
@@ -1121,6 +1130,7 @@ impl Renderer {
             uv_pipeline,
             wire_pipeline,
             wire3d_pipeline,
+            overlay_pipeline,
             highlight_pipeline,
             bake_high_pipeline,
             cage_pipeline,
@@ -1675,6 +1685,8 @@ impl Renderer {
             behind: None,
             blit_buf,
             blit_bg,
+            overlay: None,
+            overlay_vertices: 0,
             ready: false,
         }
     }
@@ -1938,6 +1950,7 @@ impl Renderer {
         let Some(v) = self.targets(device, frame.view_id, frame.size, bloom, fx_on, refraction) else { return };
         queue.write_buffer(&v.globals, 0, bytemuck::bytes_of(&raw));
         queue.write_buffer(&v.post_buf, 0, bytemuck::bytes_of(&post));
+        upload_overlay(device, queue, v, &frame.overlay, (!data).then_some(s.exposure_ev));
         v.ready = true;
         v.history = Some((frame.clone(), rev));
         v.samples = sample;
@@ -2160,6 +2173,15 @@ impl Renderer {
         if let Some(bake) = bake {
             self.draw_bake(&mut pass, mesh, frame, bake);
         }
+
+        // Overlay quads last, so the mesh's depth hides what is behind it
+        if uv_set.is_none()
+            && let Some(overlay) = targets.overlay.as_ref().filter(|_| targets.overlay_vertices > 0)
+        {
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_vertex_buffer(0, overlay.slice(..));
+            pass.draw(0..targets.overlay_vertices, 0..1);
+        }
     }
 
     /// Bake mode's high poly, UV seams and cages over the low poly `low_poly`
@@ -2261,6 +2283,51 @@ fn drawable_ranges<'a>(
     })
 }
 
+/// A quad's two triangles, as corner indices
+const QUAD_TRIANGLES: [usize; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Write `quads` into the view's overlay buffer, colors divided by the exposure only (undoing ACES makes saturated colors overshoot)
+fn upload_overlay(device: &wgpu::Device, queue: &wgpu::Queue, view: &mut ViewTargets, quads: &[OverlayQuad], exposure_ev: Option<f32>) {
+    view.overlay_vertices = 0;
+    let Some(vertex_count) = quads.len().checked_mul(QUAD_TRIANGLES.len()).and_then(|count| u32::try_from(count).ok()) else {
+        log::warn!("Symmetry overlay has too many vertices; hide the intersection or use a simpler mesh");
+        return;
+    };
+
+    // A valid imported mesh can produce more intersection vertices than the GPU accepts
+    let byte_count = u64::from(vertex_count) * std::mem::size_of::<Vertex>() as u64;
+    if byte_count > device.limits().max_buffer_size {
+        log::warn!("Symmetry overlay exceeds the GPU buffer limit; hide the intersection or use a simpler mesh");
+        return;
+    }
+
+    if vertex_count == 0 {
+        return;
+    }
+
+    let vertices: Vec<Vertex> = quads
+        .iter()
+        .flat_map(|quad| {
+            let [r, g, b] = exposure_ev.map_or(quad.color, |exposure_ev| crate::set_highlight::scene_color_showing(quad.color, exposure_ev, false));
+            let vertex = |corner: Vec3| Vertex { pos: corner.to_array(), nrm: [0.0; 3], tan: [r, g, b, quad.opacity], uv: [0.0; 2] };
+            QUAD_TRIANGLES.map(|corner| vertex(quad.corners[corner]))
+        })
+        .collect();
+    let bytes: &[u8] = bytemuck::cast_slice(&vertices);
+    if view.overlay.as_ref().is_none_or(|buffer| buffer.size() < bytes.len() as u64) {
+        view.overlay = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tc_overlay"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+    if let Some(buffer) = &view.overlay {
+        queue.write_buffer(buffer, 0, bytes);
+        view.overlay_vertices = vertex_count;
+    }
+}
+
 /// Globals `highlight`: the highlight's color and opacity, all zero without one. Data views skip exposure and tone mapping, so they take the color as it is
 fn highlight_globals(shade: &Shade, data: bool) -> [f32; 4] {
     let Some(highlight) = shade.highlight else { return [0.0; 4] };
@@ -2281,6 +2348,23 @@ fn highlight_shift(size: [u32; 2]) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::headless::Headless;
+
+    #[test]
+    fn oversized_overlays_leave_the_view_usable() {
+        let Ok(mut headless) = Headless::new() else { return };
+        let limit = headless.device.limits().max_buffer_size as usize;
+        let count = limit / (QUAD_TRIANGLES.len() * std::mem::size_of::<Vertex>()) + 1;
+        let quad = OverlayQuad { corners: [Vec3::ZERO; 4], color: [1.0, 0.0, 0.0], opacity: 0.5 };
+        let quads = vec![quad; count];
+        let view = headless.renderer.targets(&headless.device, 1, [32, 32], false, false, false).unwrap();
+        upload_overlay(&headless.device, &headless.queue, view, &[quad], None);
+
+        upload_overlay(&headless.device, &headless.queue, view, &quads, None);
+
+        assert_eq!(view.overlay_vertices, 0, "skip overlays beyond the device limit");
+        upload_overlay(&headless.device, &headless.queue, view, &[quad], None);
+        assert_eq!(view.overlay_vertices, 6, "the next frame can draw its overlay");
+    }
 
     /// A headless renderer with one 256² texture set, and the base color slot's full-size
     /// texture handed over as WebGPU would: allocated, with its verdict still to come.

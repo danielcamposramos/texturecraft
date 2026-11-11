@@ -477,3 +477,21 @@ fn loose_layer_textures_are_packaged() {
         assert_eq!((f.name, f.bytes == out.bytes, f.warnings.len()), (format!("t.{ext}"), true, 1), "{ext}");
     }
 }
+
+#[test]
+fn package_stops_reading_textures_after_exceeding_the_budget() {
+    let mesh = import_mesh_bytes("scene.usda", SCENE.as_bytes()).unwrap().mesh;
+    let textures: Vec<_> = (0..3).map(|index| vec![file("BaseColor.png", png([index * 40, 10, 10]))]).collect();
+    let exported = usd_bytes(&mesh, "Budget test", &textures, UsdFormat::Usda).unwrap();
+    let mut reads = 0;
+    let mut read = |name: &str| {
+        reads += 1;
+        let normalized = super::below(name)?;
+        exported.textures.iter().find(|(stored, _)| *stored == normalized).map(|(_, bytes)| bytes.clone())
+    };
+
+    let result = super::package_with_limit("scene.usda", &exported.bytes, &mut read, exported.bytes.len() as u64);
+
+    assert!(matches!(result, Err(crate::FormatError::TooLarge(_))));
+    assert_eq!(reads, 1, "later materials must not allocate more texture buffers");
+}

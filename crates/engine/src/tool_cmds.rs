@@ -4,9 +4,9 @@
 use serde_json::{Value, json};
 use texturecraft_core::Channel;
 use texturecraft_geom::glam::Vec2;
-use texturecraft_paint::{Alignment, BrushAlpha, alphas};
+use texturecraft_paint::{Alignment, BrushAlpha, MAX_RADIAL_COPIES, alphas};
 
-use crate::commands::{CommandSpec, always, bad, boolp, channel_param, color_param, f32p, strp};
+use crate::commands::{CommandSpec, always, bad, boolp, channel_param, color_param, f32p, strp, vec3};
 use crate::fill_hit_test::FillHitTest;
 use crate::fill_mode::FillMode;
 use crate::session::{CloneFrom, CloneSource, StackTarget, Tool};
@@ -36,7 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Brush settings",
             [],
             None,
-            "{size?: 0..100, flow?: 0..100, opacity?: 0..100, spacing?: 1..1000, hardness?: 0..100, angle?, followPath?, alignment?: tangent|camera, lazy?, jitterSize?, jitterAngle?, jitterFlow?, jitterPosition?, alpha?: procedural name | {image: resource name} | {library: id (alpha.list)}, backfaceCulling?, symmetryX?, symmetryY?, symmetryZ?, symmetryRadial?: 0..32 copies around symmetryAxis?: x|y|z (default y), minSize?, smudgeStrength?: 0..100, cloneSource?: composite|layer (what the Clone tool copies), particles?: {enabled?, count?: 1..16, lifetime?: 1..128 steps, gravity?: 0..2}}",
+            "{size?: 0..100, flow?: 0..100, opacity?: 0..100, spacing?: 1..1000, hardness?: 0..100, angle?, followPath?, alignment?: tangent|camera, lazy?, jitterSize?, jitterAngle?, jitterFlow?, jitterPosition?, alpha?: procedural name | {image: resource name} | {library: id (alpha.list)}, backfaceCulling?, symmetryOn? (the toolbar toggle; off keeps the settings), symmetryX?, symmetryY?, symmetryZ?, symmetryRadial?: 0..32 copies around symmetryAxis?: x|y|z (default y), symmetryOffset?: [x, y, z] (world units from the mesh center, where the mirror planes and radial axis cross), symmetryAngleSpan?: 0..360 degrees the radial copies spread over, minSize?, smudgeStrength?: 0..100, cloneSource?: composite|layer (what the Clone tool copies), particles?: {enabled?, count?: 1..16, lifetime?: 1..128 steps, gravity?: 0..2}}",
             always,
             brush
         ),
@@ -128,126 +128,159 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
     set_tool(s, t)
 }
 
-/// Brush values use the UI's 0–100 scales, so agents and the sliders speak the same numbers.
-fn brush(s: &mut Session, p: &Value) -> Result<Value> {
-    let b = &mut s.tool.brush;
-    let pct = |k: &str| f32p(p, k).map(|v| v / 100.0);
-    if let Some(v) = pct("size") {
-        b.size = v * 0.25;
+/// Brush values use the UI's 0–100 scales, so agents and the sliders speak the same numbers
+fn brush(session: &mut Session, params: &Value) -> Result<Value> {
+    let mut settings = session.tool.brush.clone();
+    let percent = |key: &str| f32p(params, key).map(|value| value / 100.0);
+
+    if let Some(value) = percent("size") {
+        settings.size = value * 0.25;
     }
-    if let Some(v) = pct("minSize") {
-        b.min_size = v;
+    if let Some(value) = percent("minSize") {
+        settings.min_size = value;
     }
-    if let Some(v) = pct("flow") {
-        b.flow = v;
+
+    if let Some(value) = percent("flow") {
+        settings.flow = value;
     }
-    if let Some(v) = pct("opacity") {
-        b.opacity = v;
+    if let Some(value) = percent("opacity") {
+        settings.opacity = value;
     }
-    if let Some(v) = pct("spacing") {
-        b.spacing = v;
+    if let Some(value) = percent("spacing") {
+        settings.spacing = value;
     }
-    if let Some(v) = pct("hardness") {
-        b.hardness = v;
+    if let Some(value) = percent("hardness") {
+        settings.hardness = value;
     }
-    if let Some(v) = f32p(p, "angle") {
-        b.angle = v;
+
+    if let Some(value) = f32p(params, "angle") {
+        settings.angle = value;
     }
-    if let Some(v) = boolp(p, "followPath") {
-        b.follow_path = v;
+    if let Some(value) = boolp(params, "followPath") {
+        settings.follow_path = value;
     }
-    if let Some(a) = strp(p, "alignment") {
-        b.alignment = match a {
+    if let Some(alignment) = strp(params, "alignment") {
+        settings.alignment = match alignment {
             "camera" => Alignment::Camera,
             "tangent" | "uv" => Alignment::Tangent,
             other => return Err(bad("tool.brush", format!("unknown alignment `{other}`"))),
         };
     }
-    if let Some(v) = f32p(p, "lazy") {
-        b.lazy = v;
+
+    if let Some(value) = f32p(params, "lazy") {
+        settings.lazy = value;
     }
-    for (k, slot) in [("jitterSize", &mut b.jitter_size), ("jitterAngle", &mut b.jitter_angle), ("jitterFlow", &mut b.jitter_flow)] {
-        if let Some(v) = f32p(p, k) {
-            *slot = v / 100.0;
+
+    for (key, slot) in [("jitterSize", &mut settings.jitter_size), ("jitterAngle", &mut settings.jitter_angle), ("jitterFlow", &mut settings.jitter_flow)] {
+        if let Some(value) = f32p(params, key) {
+            *slot = value / 100.0;
         }
     }
-    if let Some(v) = f32p(p, "jitterPosition") {
-        b.jitter_position = v / 100.0;
+    if let Some(value) = f32p(params, "jitterPosition") {
+        settings.jitter_position = value / 100.0;
     }
-    let alpha = p.get("alpha");
-    if let Some(a) = strp(p, "alpha") {
-        b.alpha = BrushAlpha::parse(a).ok_or_else(|| bad("tool.brush", format!("unknown alpha `{a}`")))?;
-        (b.alpha_image, b.alpha_library) = (None, None);
-    } else if let Some(name) = alpha.and_then(|a| a.get("image")).and_then(Value::as_str) {
-        if !s.images.contains_key(name) {
+
+    let alpha = params.get("alpha");
+    if let Some(alpha_name) = strp(params, "alpha") {
+        settings.alpha = BrushAlpha::parse(alpha_name).ok_or_else(|| bad("tool.brush", format!("unknown alpha `{alpha_name}`")))?;
+        (settings.alpha_image, settings.alpha_library) = (None, None);
+    } else if let Some(name) = alpha.and_then(|alpha| alpha.get("image")).and_then(Value::as_str) {
+        if !session.images.contains_key(name) {
             return Err(bad("tool.brush", format!("no image resource `{name}` (import it first)")));
         }
-        (b.alpha_image, b.alpha_library) = (Some(name.to_string()), None);
-    } else if let Some(id) = alpha.and_then(|a| a.get("library")).and_then(Value::as_str) {
-        let a = alphas::find(id).ok_or_else(|| bad("tool.brush", format!("unknown library alpha `{id}` (see alpha.list)")))?;
-        // Render it now rather than on the first stamp.
-        a.image();
-        (b.alpha_image, b.alpha_library) = (None, Some(a.id.clone()));
+
+        (settings.alpha_image, settings.alpha_library) = (Some(name.to_string()), None);
+    } else if let Some(id) = alpha.and_then(|alpha| alpha.get("library")).and_then(Value::as_str) {
+        let alpha = alphas::find(id).ok_or_else(|| bad("tool.brush", format!("unknown library alpha `{id}` (see alpha.list)")))?;
+
+        // Render it now rather than on the first stamp
+        alpha.image();
+        (settings.alpha_image, settings.alpha_library) = (None, Some(alpha.id.clone()));
     }
-    if let Some(v) = boolp(p, "backfaceCulling") {
-        b.backface_culling = v;
+
+    if let Some(value) = boolp(params, "backfaceCulling") {
+        settings.backface_culling = value;
     }
-    for (k, slot) in [("symmetryX", &mut b.symmetry.x), ("symmetryY", &mut b.symmetry.y), ("symmetryZ", &mut b.symmetry.z)] {
-        if let Some(v) = boolp(p, k) {
-            *slot = v;
+
+    if let Some(value) = boolp(params, "symmetryOn") {
+        settings.symmetry.enabled = value;
+    }
+
+    for (key, slot) in [("symmetryX", &mut settings.symmetry.x), ("symmetryY", &mut settings.symmetry.y), ("symmetryZ", &mut settings.symmetry.z)] {
+        if let Some(value) = boolp(params, key) {
+            *slot = value;
         }
     }
-    if let Some(v) = f32p(p, "symmetryRadial") {
-        b.symmetry.radial = v.clamp(0.0, 32.0) as u8;
+
+    if let Some(value) = f32p(params, "symmetryRadial") {
+        settings.symmetry.radial = value.clamp(0.0, f32::from(MAX_RADIAL_COPIES)) as u8;
     }
-    if let Some(a) = strp(p, "symmetryAxis") {
-        b.symmetry.axis = match a.to_ascii_lowercase().as_str() {
+
+    if let Some(axis) = strp(params, "symmetryAxis") {
+        settings.symmetry.axis = match axis.to_ascii_lowercase().as_str() {
             "x" => 0,
             "y" => 1,
             "z" => 2,
-            _ => return Err(bad("tool.brush", format!("unknown symmetry axis `{a}` (x, y or z)"))),
+            _ => return Err(bad("tool.brush", format!("unknown symmetry axis `{axis}` (x, y or z)"))),
         };
     }
-    if let Some(v) = boolp(p, "screenSpace") {
-        b.screen_space = v;
+
+    if let Some(value) = f32p(params, "symmetryAngleSpan") {
+        settings.symmetry.angle_span = value;
     }
-    if let Some(q) = p.get("particles") {
-        let pt = &mut b.particles;
-        pt.enabled = boolp(q, "enabled").unwrap_or(pt.enabled);
-        pt.count = f32p(q, "count").map_or(pt.count, |v| v as u32);
-        pt.lifetime = f32p(q, "lifetime").map_or(pt.lifetime, |v| v as u32);
-        pt.gravity = f32p(q, "gravity").unwrap_or(pt.gravity);
+
+    if params.get("symmetryOffset").is_some() {
+        settings.symmetry.offset = vec3(params, "symmetryOffset").ok_or_else(|| bad("tool.brush", "`symmetryOffset` must be [x, y, z]"))?.to_array();
     }
-    *b = b.sanitized();
-    if let Some(v) = f32p(p, "smudgeStrength") {
-        s.tool.smudge_strength = (v / 100.0).clamp(0.0, 1.0);
+
+    if let Some(value) = boolp(params, "screenSpace") {
+        settings.screen_space = value;
     }
-    if let Some(v) = strp(p, "cloneSource") {
-        s.tool.clone_from = match v {
+
+    if let Some(particle_params) = params.get("particles") {
+        let particles = &mut settings.particles;
+        particles.enabled = boolp(particle_params, "enabled").unwrap_or(particles.enabled);
+        particles.count = f32p(particle_params, "count").map_or(particles.count, |value| value as u32);
+        particles.lifetime = f32p(particle_params, "lifetime").map_or(particles.lifetime, |value| value as u32);
+        particles.gravity = f32p(particle_params, "gravity").unwrap_or(particles.gravity);
+    }
+
+    let clone_from = if let Some(value) = strp(params, "cloneSource") {
+        match value {
             "composite" => CloneFrom::Composite,
             "layer" => CloneFrom::Layer,
             other => return Err(bad("tool.brush", format!("unknown clone source `{other}`: use composite or layer"))),
-        };
+        }
+    } else {
+        session.tool.clone_from
+    };
+
+    session.tool.brush = settings.sanitized();
+    session.tool.clone_from = clone_from;
+    if let Some(value) = f32p(params, "smudgeStrength") {
+        session.tool.smudge_strength = (value / 100.0).clamp(0.0, 1.0);
     }
-    s.revision = s.revision.wrapping_add(1);
-    Ok(brush_json(s))
+
+    session.revision = session.revision.wrapping_add(1);
+    Ok(brush_json(session))
 }
 
-pub(crate) fn brush_json(s: &Session) -> Value {
-    let b = &s.tool.brush;
+pub(crate) fn brush_json(session: &Session) -> Value {
+    let settings = &session.tool.brush;
     json!({
-        "size": b.size / 0.25 * 100.0, "minSize": b.min_size * 100.0, "flow": b.flow * 100.0, "opacity": b.opacity * 100.0,
-        "spacing": b.spacing * 100.0, "hardness": b.hardness * 100.0, "angle": b.angle, "followPath": b.follow_path,
-        "alignment": format!("{:?}", b.alignment).to_lowercase(), "lazy": b.lazy,
-        "alpha": match (&b.alpha_image, &b.alpha_library) {
+        "size": settings.size / 0.25 * 100.0, "minSize": settings.min_size * 100.0, "flow": settings.flow * 100.0, "opacity": settings.opacity * 100.0,
+        "spacing": settings.spacing * 100.0, "hardness": settings.hardness * 100.0, "angle": settings.angle, "followPath": settings.follow_path,
+        "alignment": format!("{:?}", settings.alignment).to_lowercase(), "lazy": settings.lazy,
+        "alpha": match (&settings.alpha_image, &settings.alpha_library) {
             (Some(name), _) => json!({ "image": name }),
             (None, Some(id)) => json!({ "library": id }),
-            (None, None) => json!(b.alpha.label()),
+            (None, None) => json!(settings.alpha.label()),
         },
-        "backfaceCulling": b.backface_culling, "symmetry": [b.symmetry.x, b.symmetry.y, b.symmetry.z],
-        "radialSymmetry": { "copies": b.symmetry.radial, "axis": (["x", "y", "z"].get(b.symmetry.axis as usize)) },
-        "smudgeStrength": s.tool.smudge_strength * 100.0, "particles": b.particles,
-        "cloneSource": if s.tool.clone_from == CloneFrom::Layer { "layer" } else { "composite" },
+        "backfaceCulling": settings.backface_culling, "symmetry": [settings.symmetry.x, settings.symmetry.y, settings.symmetry.z],
+        "radialSymmetry": { "copies": settings.symmetry.radial, "axis": (["x", "y", "z"].get(settings.symmetry.axis as usize)) },
+        "symmetryOffset": settings.symmetry.offset, "symmetryOn": settings.symmetry.enabled, "symmetryAngleSpan": settings.symmetry.angle_span,
+        "smudgeStrength": session.tool.smudge_strength * 100.0, "particles": settings.particles,
+        "cloneSource": if session.tool.clone_from == CloneFrom::Layer { "layer" } else { "composite" },
     })
 }
 

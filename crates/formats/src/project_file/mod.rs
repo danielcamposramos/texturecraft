@@ -18,6 +18,7 @@
 //! count of 0, followed by `width × height × components` f32 LE. Pixels of a UV-tiled texture
 //! set cover its whole atlas (`resolution` per tile, see `TileGrid`).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Read, Seek, Write};
 use std::sync::Arc;
@@ -28,18 +29,30 @@ use texturecraft_texel::{TILE_AREA, TileImage};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use self::entries::Entry;
+use self::load_budget::LoadBudget;
+use self::metadata_reader::MetadataReader;
 use crate::{FormatError, MAX_IMAGE_SIZE, Result, malformed};
+
+mod entries;
+mod load_budget;
+mod metadata_reader;
+mod project_open_limit;
+#[cfg(not(target_arch = "wasm32"))]
+pub use entries::{DEFAULT_RAM_PERCENT, DEFAULT_RESERVED_CORES, available_save_resources, save_ram_budget, set_save_resources};
+pub use project_open_limit::{DEFAULT_PROJECT_OPEN_LIMIT_GIB, project_open_limit_gib, set_project_open_limit_gib};
 
 const KIND: &str = "project file";
 const MAGIC: &[u8; 4] = b"TCTX";
 /// Version of the `.bin` layout.
 const BIN_VERSION: u32 = 1;
+const BIN_HEADER_BYTES: usize = 24;
 const MAX_JSON: u64 = 256 << 20;
 const MAX_THUMBNAIL: u64 = 64 << 20;
 const MAX_RESOURCE: u64 = 512 << 20;
 const MAX_ENTRIES: usize = 100_000;
-/// Total decompressed bytes accepted from one project file (zip-bomb guard).
-const MAX_TOTAL: u64 = 8 << 30;
+/// Bound ZIP index parsing before the archive exposes its entry count.
+const MAX_ZIP_METADATA_BYTES: u64 = 32 << 20;
 /// Largest image (texels) of a texture set or baked map: UV-tiled sets hold several tiles.
 const MAX_TEXELS: u64 = 1 << 28;
 
@@ -156,21 +169,42 @@ fn unique_entry_name(dir: &str, name: &str, used: &mut HashSet<String>) -> Strin
     entry
 }
 
-fn write_project<W: Write + Seek>(out: W, pf: &ProjectFile) -> Result<()> {
-    let mut zip = ZipWriter::new(out);
+/// Floats converted to bytes at a time when a baked map streams into the compressor.
+const BAKED_CHUNK: usize = 1 << 16;
+
+fn write_baked(w: &mut dyn Write, res: u32, h: u32, comps: usize, data: &[f32]) -> std::io::Result<()> {
+    w.write_all(&header(res, h, comps, 0))?;
+    let mut buf = Vec::with_capacity(BAKED_CHUNK * 4);
+    for chunk in data.chunks(BAKED_CHUNK) {
+        buf.clear();
+        buf.extend(chunk.iter().flat_map(|v| v.to_le_bytes()));
+        w.write_all(&buf)?;
+    }
+    Ok(())
+}
+
+/// The zip entries of a project file, in file order. Bodies run later, possibly on other threads.
+fn entries(pf: &ProjectFile) -> Result<Vec<Entry<'_>>> {
     let deflate = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).large_file(true);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let json = serde_json::to_vec_pretty(&pf.project).map_err(|e| FormatError::Invalid(e.to_string()))?;
-    zip.start_file("project.json", deflate).map_err(zip_err)?;
-    zip.write_all(&json)?;
+    let mut out = vec![Entry { name: "project.json".into(), options: deflate, weight: json.len() as u64, body: Box::new(move |w| w.write_all(&json)) }];
     if let Some((ext, bytes)) = &pf.mesh {
-        zip.start_file(format!("mesh.{}", sanitize_ext(ext)), deflate).map_err(zip_err)?;
-        zip.write_all(bytes)?;
+        out.push(Entry {
+            name: format!("mesh.{}", sanitize_ext(ext)),
+            options: deflate,
+            weight: bytes.len() as u64,
+            body: Box::new(move |w| w.write_all(bytes)),
+        });
     }
     let mut used = HashSet::new();
     for (dir, (name, bytes)) in pf.high_poly.iter().map(|m| ("highpoly", m)).chain(pf.cage.iter().map(|m| ("cage", m))) {
-        zip.start_file(unique_entry_name(dir, name, &mut used), deflate).map_err(zip_err)?;
-        zip.write_all(bytes)?;
+        out.push(Entry {
+            name: unique_entry_name(dir, name, &mut used),
+            options: deflate,
+            weight: bytes.len() as u64,
+            body: Box::new(move |w| w.write_all(bytes)),
+        });
     }
     for ((texture_set, target), map) in &pf.bake_paint {
         if map.width == 0 || map.height == 0 || map.values.len() as u64 != u64::from(map.width) * u64::from(map.height) {
@@ -180,23 +214,29 @@ fn write_project<W: Write + Seek>(out: W, pf: &ProjectFile) -> Result<()> {
             BakePaintTarget::Cage => "cage",
             BakePaintTarget::Skew => "skew",
         };
-        zip.start_file(format!("bake_paint/{texture_set}_{target_name}.bin"), deflate).map_err(zip_err)?;
-        zip.write_all(&header(map.width, map.height, 1, 0))?;
-        for value in &map.values {
-            zip.write_all(&value.to_le_bytes())?;
-        }
+        out.push(Entry {
+            name: format!("bake_paint/{texture_set}_{target_name}.bin"),
+            options: deflate,
+            weight: map.values.len() as u64 * 4,
+            body: Box::new(move |w| write_baked(w, map.width, map.height, 1, &map.values)),
+        });
     }
     let mut layers: Vec<_> = pf.pixels.layers.iter().collect();
     layers.sort_by_key(|(k, _)| **k);
     for ((id, c), img) in layers {
-        zip.start_file(format!("pixels/layer_{}_{}.bin", id.0, c.id()), deflate).map_err(zip_err)?;
-        write_tiles(&mut zip, img)?;
+        let weight = (img.allocated_count() * (TILE_AREA * img.comps() * 2 + 8)) as u64;
+        out.push(Entry {
+            name: format!("pixels/layer_{}_{}.bin", id.0, c.id()),
+            options: deflate,
+            weight,
+            body: Box::new(move |mut w| write_tiles(&mut w, img)),
+        });
     }
     let mut masks: Vec<_> = pf.pixels.masks.iter().collect();
     masks.sort_by_key(|(k, _)| **k);
     for (id, img) in masks {
-        zip.start_file(format!("pixels/mask_{}.bin", id.0), deflate).map_err(zip_err)?;
-        write_tiles(&mut zip, img)?;
+        let weight = (img.allocated_count() * (TILE_AREA * img.comps() * 2 + 8)) as u64;
+        out.push(Entry { name: format!("pixels/mask_{}.bin", id.0), options: deflate, weight, body: Box::new(move |mut w| write_tiles(&mut w, img)) });
     }
     for (ts, maps) in &pf.baked {
         let r = maps.resolution;
@@ -206,21 +246,33 @@ fn write_project<W: Write + Seek>(out: W, pf: &ProjectFile) -> Result<()> {
             if h == 0 || data.len() != (r as usize) * (h as usize) * m.components() {
                 continue;
             }
-            zip.start_file(format!("baked/{ts}_{}.bin", m.id()), deflate).map_err(zip_err)?;
-            zip.write_all(&header(r, h, m.components(), 0))?;
-            let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-            zip.write_all(&bytes)?;
+            let comps = m.components();
+            out.push(Entry {
+                name: format!("baked/{ts}_{}.bin", m.id()),
+                options: deflate,
+                weight: data.len() as u64 * 4,
+                body: Box::new(move |w| write_baked(w, r, h, comps, data)),
+            });
         }
     }
     if let Some(png) = &pf.thumbnail {
-        zip.start_file("thumbnail.png", stored).map_err(zip_err)?;
-        zip.write_all(png)?;
+        out.push(Entry { name: "thumbnail.png".into(), options: stored, weight: png.len() as u64, body: Box::new(move |w| w.write_all(png)) });
     }
     used.clear();
     for (name, bytes) in &pf.resources {
-        zip.start_file(unique_entry_name("resources", name, &mut used), stored).map_err(zip_err)?;
-        zip.write_all(bytes)?;
+        out.push(Entry {
+            name: unique_entry_name("resources", name, &mut used),
+            options: stored,
+            weight: bytes.len() as u64,
+            body: Box::new(move |w| w.write_all(bytes)),
+        });
     }
+    Ok(out)
+}
+
+fn write_project<W: Write + Seek>(out: W, pf: &ProjectFile) -> Result<()> {
+    let mut zip = ZipWriter::new(out);
+    entries::write_entries(&mut zip, entries(pf)?)?;
     zip.finish().map_err(zip_err)?;
     Ok(())
 }
@@ -238,27 +290,35 @@ pub fn load_project(path: &std::path::Path) -> Result<ProjectFile> {
     crate::guard(KIND, || load(std::io::BufReader::new(file)))
 }
 
-/// Counts decompressed bytes against [`MAX_TOTAL`].
-struct Budget(u64);
-
-impl Budget {
-    fn take(&mut self, n: u64) -> Result<()> {
-        self.0 = self.0.saturating_add(n);
-        if self.0 > MAX_TOTAL {
-            return Err(FormatError::TooLarge(format!("project file decompresses to more than {MAX_TOTAL} bytes")));
-        }
-        Ok(())
-    }
-}
-
-fn read_all(r: &mut impl Read, cap: u64, budget: &mut Budget, what: &str) -> Result<Vec<u8>> {
+fn read_all(reader: &mut impl Read, cap: u64, budget: &mut LoadBudget, what: &str) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    r.take(cap.saturating_add(1)).read_to_end(&mut out).map_err(|e| malformed(KIND, format!("{what}: {e}")))?;
+
+    // Read at most one byte beyond either limit to detect overflow without a full entry allocation
+    let read_limit = cap.min(budget.remaining()).saturating_add(1);
+    reader.take(read_limit).read_to_end(&mut out).map_err(|e| malformed(KIND, format!("{what}: {e}")))?;
     if out.len() as u64 > cap {
         return Err(FormatError::TooLarge(format!("{what} is larger than {cap} bytes")));
     }
-    budget.take(out.len() as u64)?;
+
+    budget.take(out.len() as u64).map_err(FormatError::TooLarge)?;
     Ok(out)
+}
+
+/// Decode bounded chunks so a false header cannot allocate an entire missing map.
+fn read_f32s(reader: &mut impl Read, count: usize, what: &str) -> Result<Vec<f32>> {
+    let mut values = Vec::new();
+    let mut bytes = vec![0u8; BAKED_CHUNK.min(count) * 4];
+    let mut remaining = count;
+    while remaining > 0 {
+        let chunk_values = BAKED_CHUNK.min(remaining);
+        let chunk = bytes.get_mut(..chunk_values * 4).ok_or_else(|| malformed(KIND, format!("{what}: invalid float chunk")))?;
+        read_exact(reader, chunk, what)?;
+        values.try_reserve(chunk_values).map_err(|_| FormatError::TooLarge(format!("{what}: not enough memory for {count} values")))?;
+        values.extend(chunk.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes(*bytes)));
+        remaining -= chunk_values;
+    }
+
+    Ok(values)
 }
 
 fn read_exact(r: &mut impl Read, buf: &mut [u8], what: &str) -> Result<()> {
@@ -271,7 +331,7 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
 
 /// Read and check a `.bin` header: returns (width, height, comps, count).
 fn read_header(r: &mut impl Read, what: &str) -> Result<(u32, u32, usize, usize)> {
-    let mut h = [0u8; 24];
+    let mut h = [0u8; BIN_HEADER_BYTES];
     read_exact(r, &mut h, what)?;
     if h.get(..4) != Some(MAGIC.as_slice()) {
         return Err(malformed(KIND, format!("{what}: bad magic")));
@@ -293,7 +353,8 @@ fn expect_end(r: &mut impl Read, what: &str) -> Result<()> {
     }
 }
 
-fn read_tiles(reader: &mut impl Read, size: (u32, u32), components: usize, budget: &mut Budget, what: &str) -> Result<TileImage> {
+fn read_tiles(reader: &mut impl Read, size: (u32, u32), components: usize, budget: &mut LoadBudget, what: &str) -> Result<TileImage> {
+    budget.take(BIN_HEADER_BYTES as u64).map_err(FormatError::TooLarge)?;
     let (width, height, stored_components, count) = read_header(reader, what)?;
     if (width, height) != size || stored_components != components {
         return Err(malformed(
@@ -310,6 +371,7 @@ fn read_tiles(reader: &mut impl Read, size: (u32, u32), components: usize, budge
     let mut bytes = vec![0u8; TILE_AREA * components * 2];
     let mut position_bytes = [0u8; 8];
     for _ in 0..count {
+        budget.take((position_bytes.len() + bytes.len()) as u64).map_err(FormatError::TooLarge)?;
         read_exact(reader, &mut position_bytes, what)?;
         let (tx, ty) = (u32_at(&position_bytes, 0), u32_at(&position_bytes, 1));
         if tx >= image.tiles_x() || ty >= image.tiles_y() || image.is_allocated(tx, ty) {
@@ -317,7 +379,6 @@ fn read_tiles(reader: &mut impl Read, size: (u32, u32), components: usize, budge
         }
 
         read_exact(reader, &mut bytes, what)?;
-        budget.take(bytes.len() as u64)?;
         let data: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
         image.set_tile(tx, ty, Some(Arc::new(data)));
     }
@@ -328,19 +389,25 @@ fn read_tiles(reader: &mut impl Read, size: (u32, u32), components: usize, budge
 }
 
 /// A baked map: (width, height, data).
-fn read_baked(reader: &mut impl Read, components: usize, budget: &mut Budget, what: &str) -> Result<(u32, u32, Vec<f32>)> {
+fn read_baked(reader: &mut impl Read, declared_bytes: u64, components: usize, budget: &mut LoadBudget, what: &str) -> Result<(u32, u32, Vec<f32>)> {
+    budget.take(BIN_HEADER_BYTES as u64).map_err(FormatError::TooLarge)?;
     let (width, height, stored_components, _) = read_header(reader, what)?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_TEXELS || stored_components != components {
         return Err(malformed(KIND, format!("{what}: bad size {width}×{height}×{stored_components}")));
     }
 
-    let value_count = (width as usize) * (height as usize) * components;
-    budget.take(value_count as u64 * 4)?;
-    let mut bytes = vec![0u8; value_count * 4];
-    read_exact(reader, &mut bytes, what)?;
+    let value_count = u64::from(width) * u64::from(height) * components as u64;
+    let payload_bytes = value_count * 4;
+    if declared_bytes != BIN_HEADER_BYTES as u64 + payload_bytes {
+        return Err(malformed(KIND, format!("{what}: {declared_bytes} bytes for a {width}×{height}×{components} map")));
+    }
+
+    budget.take(payload_bytes).map_err(FormatError::TooLarge)?;
+    let value_count = usize::try_from(value_count).map_err(|_| FormatError::TooLarge(format!("{what}: too many values for this platform")))?;
+    let data = read_f32s(reader, value_count, what)?;
     expect_end(reader, what)?;
 
-    Ok((width, height, bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()))
+    Ok((width, height, data))
 }
 
 /// Texture set holding a paint layer, a content effect or a mask effect id.
@@ -350,12 +417,44 @@ fn texture_set_of(project: &Project, id: LayerId) -> Option<usize> {
 }
 
 fn load<R: Read + Seek>(reader: R) -> Result<ProjectFile> {
-    let mut zip = ZipArchive::new(reader).map_err(zip_err)?;
+    let limit_bytes = u64::from(project_open_limit_gib()) << 30;
+    load_with_budget(reader, LoadBudget::new(limit_bytes))
+}
+
+fn check_archive<R: Read + Seek>(zip: &mut ZipArchive<R>, limit_bytes: u64) -> Result<()> {
     if zip.len() > MAX_ENTRIES {
         return Err(FormatError::TooLarge(format!("project file has more than {MAX_ENTRIES} entries")));
     }
 
-    let mut budget = Budget(0);
+    // Count every declared payload, including ignored entries, before any decompression
+    let mut declared_budget = LoadBudget::new(limit_bytes);
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index).map_err(zip_err)?;
+        declared_budget.take(entry.size()).map_err(FormatError::TooLarge)?;
+    }
+
+    // Shared compressed ranges can amplify one payload into many apparent files
+    if zip.has_overlapping_entries().map_err(zip_err)? {
+        return Err(malformed(KIND, "overlapping ZIP entries are not supported"));
+    }
+
+    Ok(())
+}
+
+fn open_archive<'a, R: Read + Seek>(reader: R, metadata_only: &'a Cell<bool>, metadata_bytes: u64) -> Result<ZipArchive<MetadataReader<'a, R>>> {
+    let reader = MetadataReader::new(reader, metadata_only, metadata_bytes)?;
+    // Project archives start at byte zero; avoid scanning payloads to guess an embedded ZIP offset
+    let config = zip::read::Config { archive_offset: zip::read::ArchiveOffset::Known(0) };
+    let archive = ZipArchive::with_config(config, reader).map_err(zip_err)?;
+    metadata_only.set(false);
+    Ok(archive)
+}
+
+fn load_with_budget<R: Read + Seek>(reader: R, mut budget: LoadBudget) -> Result<ProjectFile> {
+    let metadata_only = Cell::new(true);
+    let mut zip = open_archive(reader, &metadata_only, MAX_ZIP_METADATA_BYTES)?;
+    check_archive(&mut zip, budget.remaining())?;
+
     let json = read_all(&mut zip.by_name("project.json").map_err(zip_err)?, MAX_JSON, &mut budget, "project.json")?;
     #[derive(serde::Deserialize)]
     struct Version {
@@ -388,6 +487,7 @@ fn load<R: Read + Seek>(reader: R) -> Result<ProjectFile> {
 
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(zip_err)?;
+        let declared_bytes = f.size();
         let name = f.name().map_err(zip_err)?.into_owned();
         let size_of = |id: LayerId| texture_set_of(&pf.project, id).and_then(|ts| pf.project.texture_sets.get(ts)).map(|t| t.size());
         if name == "thumbnail.png" {
@@ -421,7 +521,7 @@ fn load<R: Read + Seek>(reader: R) -> Result<ProjectFile> {
                 "skew" => BakePaintTarget::Skew,
                 _ => return Err(malformed(KIND, format!("unknown bake paint target in {name}"))),
             };
-            let (width, height, values) = read_baked(&mut f, 1, &mut budget, &name)?;
+            let (width, height, values) = read_baked(&mut f, declared_bytes, 1, &mut budget, &name)?;
             pf.bake_paint.insert((texture_set, target), BakePaintData { width, height, values });
         } else if let Some(ext) = name.strip_prefix("mesh.").filter(|e| !e.contains('/')) {
             let bytes = read_all(&mut f, crate::mesh_import::MAX_MESH_FILE_BYTES, &mut budget, &name)?;
@@ -453,7 +553,7 @@ fn load<R: Read + Seek>(reader: R) -> Result<ProjectFile> {
                 continue;
             }
 
-            let (res, height, data) = read_baked(&mut f, m.components(), &mut budget, &name)?;
+            let (res, height, data) = read_baked(&mut f, declared_bytes, m.components(), &mut budget, &name)?;
             let maps = pf.baked.entry(ts).or_default();
             if maps.maps.is_empty() {
                 maps.resolution = res;

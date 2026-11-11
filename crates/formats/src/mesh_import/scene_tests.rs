@@ -368,6 +368,25 @@ fn texture_file_scene(relative: &'static str) -> Vec<N> {
 }
 
 #[test]
+fn fbx_package_stops_reading_textures_after_exceeding_the_budget() {
+    let mut nodes = texture_file_scene("texture.png");
+    let connections = nodes.iter_mut().find(|node| node.name == "Connections").unwrap();
+    connections.children.push(n("C", vec![P::S("OP"), P::L(40), P::L(30), P::S("DiffuseColor")], vec![]));
+    let bytes = ascii_fbx(&nodes).into_bytes();
+    let texture = tiny_png();
+    let mut reads = 0;
+    let mut read = |_: &str| {
+        reads += 1;
+        Some(texture.clone())
+    };
+
+    let result = super::fbx::package_with_limit("mesh.fbx", &bytes, &mut read, bytes.len() as u64);
+
+    assert!(matches!(result, Err(crate::FormatError::TooLarge(_))));
+    assert_eq!(reads, 1, "later materials must not allocate more texture buffers");
+}
+
+#[test]
 fn fbx_texture_files_are_packaged_with_the_mesh() {
     let png = tiny_png();
     let blue = |bytes: &[u8]| import_high_poly_bytes("wood.fbx", bytes).unwrap().base_color[1].as_ref().map(|b| (b.width, b.texels[0]));

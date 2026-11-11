@@ -3,7 +3,9 @@
 
 use serde_json::{Value, json};
 use texturecraft_paint::BrushSettings;
-use texturecraft_paint::presets::{PRESETS, find_preset, with_stroke_of};
+#[cfg(not(target_arch = "wasm32"))]
+use texturecraft_paint::presets::with_stroke_of;
+use texturecraft_paint::presets::{PRESETS, find_preset};
 
 use crate::commands::{CommandSpec, always, bad, strp};
 use crate::tool_cmds::brush_json;

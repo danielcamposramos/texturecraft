@@ -6,9 +6,14 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod cook_process;
+
 use serde_json::{Map, Value, json};
 use texturecraft_core::{BakedMap, Channel, Fill, Layer, LayerId, LayerKind, LinkParam, MaterialLink, Source};
-use texturecraft_formats::mcmat::{MCMAT_EXT, MCRAFT_EXT, PortableMaterial, is_mcraft, read_mcmat};
+#[cfg(not(target_arch = "wasm32"))]
+use texturecraft_formats::mcmat::MCMAT_EXT;
+use texturecraft_formats::mcmat::{MCRAFT_EXT, PortableMaterial, is_mcraft, read_mcmat};
 
 use crate::commands::{CommandSpec, bad, boolp, has_layer, layer_param, strp};
 use crate::materials::Place;
@@ -234,32 +239,29 @@ pub fn open_in_materialcraft(package: &std::path::Path) -> Result<()> {
 /// Longest a cook may run (it takes about a second at 2K).
 #[cfg(not(target_arch = "wasm32"))]
 const COOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-/// Most stderr kept from the cook, for the error message.
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_STDERR: u64 = 64 << 10;
 /// Largest cooked `.mcmat` read back.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_COOKED_BYTES: u64 = 2 << 30;
 
 /// A new, empty, owner-only folder in the temp dir: exclusive creation (fails if the name
-/// exists, even as a symlink) under a name an attacker cannot guess (std's randomly seeded hasher).
+/// exists, even as a symlink) under a name generated from operating-system randomness.
 #[cfg(not(target_arch = "wasm32"))]
 fn private_temp_dir() -> std::io::Result<std::path::PathBuf> {
-    use std::hash::{BuildHasher, Hasher};
     let mut last = None;
     for _ in 0..16 {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u32(std::process::id());
-        let dir = std::env::temp_dir().join(format!("texturecraft-link-{:016x}", h.finish()));
-        let mut b = std::fs::DirBuilder::new();
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).map_err(|error| std::io::Error::other(error.to_string()))?;
+        let directory = std::env::temp_dir().join(format!("texturecraft-link-{:032x}", u128::from_le_bytes(random)));
+        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-        match b.create(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
-            Err(e) => return Err(e),
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(error),
         }
     }
+
     Err(last.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into()))
 }
 
@@ -268,67 +270,32 @@ impl LinkJob {
     /// `PATH`); returns `.mcmat` bytes. Blocks for the cook (about a second at 2K).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn run(&self) -> Result<Vec<u8>> {
-        let other = |e: String| EngineError::Other(e);
-        let dir = private_temp_dir().map_err(|e| other(format!("temporary folder: {e}")))?;
+        let other = |error: String| EngineError::Other(error);
+        let directory = private_temp_dir().map_err(|error| other(format!("temporary folder: {error}")))?;
         let result = (|| {
-            let utf8 = |p: &std::path::Path| p.to_str().map(str::to_string).ok_or_else(|| other(format!("{} is not a UTF-8 path", p.display())));
+            let utf8 = |path: &std::path::Path| path.to_str().map(str::to_string).ok_or_else(|| other(format!("{} is not a UTF-8 path", path.display())));
             let write = |name: &str, bytes: &[u8]| {
-                let p = dir.join(name);
-                std::fs::write(&p, bytes).map_err(|e| other(format!("{name}: {e}")))?;
-                utf8(&p)
+                let path = directory.join(name);
+                std::fs::write(&path, bytes).map_err(|error| other(format!("{name}: {error}")))?;
+                utf8(&path)
             };
-            let src = write("source.mcraft", &self.package)?;
+
+            let source = write("source.mcraft", &self.package)?;
             let mut inputs = Map::new();
-            for (i, (id, png)) in self.inputs.iter().enumerate() {
-                inputs.insert(id.clone(), json!(write(&format!("input{i}.png"), png)?));
+            for (index, (id, png)) in self.inputs.iter().enumerate() {
+                inputs.insert(id.clone(), json!(write(&format!("input{index}.png"), png)?));
             }
-            let out = dir.join(format!("out.{MCMAT_EXT}"));
-            let params = json!({"path": utf8(&out)?, "size": self.size, "values": self.values, "inputs": inputs});
+
+            let output = directory.join(format!("out.{MCMAT_EXT}"));
+            let params = json!({"path": utf8(&output)?, "size": self.size, "values": self.values, "inputs": inputs});
             let cli = materialcraft_tool("materialcraft-cli", "MATERIALCRAFT_CLI");
-            let mut child = quiet(&cli)
-                .arg("run")
-                .arg(&src)
-                .arg("file.exportMaterial")
-                .arg(params.to_string())
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    other(format!(
-                        "MaterialCraft's command line ({}) did not start: {e}. Install MaterialCraft next to TextureCraft or set MATERIALCRAFT_CLI",
-                        cli.display()
-                    ))
-                })?;
-            // Keep the first bytes of stderr, drain the rest so a chatty child cannot block or grow memory.
-            let stderr = child.stderr.take().map(|mut e| {
-                std::thread::spawn(move || {
-                    use std::io::Read as _;
-                    let mut kept = Vec::new();
-                    let _ = (&mut e).take(MAX_STDERR).read_to_end(&mut kept);
-                    let _ = std::io::copy(&mut e, &mut std::io::sink());
-                    kept
-                })
-            });
-            let deadline = std::time::Instant::now() + COOK_TIMEOUT;
-            let status = loop {
-                match child.try_wait().map_err(|e| other(format!("MaterialCraft's command line: {e}")))? {
-                    Some(status) => break status,
-                    None if std::time::Instant::now() >= deadline => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(other(format!("MaterialCraft did not finish cooking within {} s", COOK_TIMEOUT.as_secs())));
-                    }
-                    None => std::thread::sleep(std::time::Duration::from_millis(20)),
-                }
-            };
-            if !status.success() {
-                let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
-                return Err(other(format!("MaterialCraft could not cook the material: {}", String::from_utf8_lossy(&stderr).trim())));
-            }
-            texturecraft_formats::read_capped(&out, MAX_COOKED_BYTES).map_err(|e| other(format!("{}: {e}", out.display())))
+            let mut command = quiet(&cli);
+            command.arg("run").arg(&source).arg("file.exportMaterial").arg(params.to_string());
+            cook_process::run(command, COOK_TIMEOUT)?;
+
+            texturecraft_formats::read_capped(&output, MAX_COOKED_BYTES).map_err(|error| other(format!("{}: {error}", output.display())))
         })();
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&directory);
         result
     }
 
@@ -510,11 +477,15 @@ fn put_maps(s: &mut Session, stem: &str, maps: &[(Channel, Vec<u8>, texturecraft
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod temp_dir_tests {
     #[test]
-    fn private_temp_dirs_are_fresh_and_unpredictable() {
-        let (a, b) = (super::private_temp_dir().unwrap(), super::private_temp_dir().unwrap());
-        assert_ne!(a, b);
+    fn private_temp_dirs_are_fresh_and_owner_only() {
+        let first = super::private_temp_dir().unwrap();
+        let second = super::private_temp_dir().unwrap();
+
+        assert_ne!(first, second);
         #[cfg(unix)]
-        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&a).unwrap().permissions()) & 0o077, 0);
-        let _ = (std::fs::remove_dir(&a), std::fs::remove_dir(&b));
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&first).unwrap().permissions()) & 0o077, 0);
+
+        std::fs::remove_dir(first).unwrap();
+        std::fs::remove_dir(second).unwrap();
     }
 }

@@ -85,7 +85,15 @@ impl Gpu {
     /// Render `s` with `kind` at `size` through `camera`; RGBA8 (sRGB) pixels.
     pub fn render(&mut self, s: &mut Session, kind: ViewKind, size: [u32; 2], camera: texturecraft_engine::geom::OrbitCamera) -> Option<(u32, u32, Vec<u8>)> {
         self.sync(s);
-        let frame = Frame { view_id: 1, size, kind, camera, shade: shade(s), visible: s.doc.project.texture_sets.iter().map(|t| t.visible).collect() };
+        let frame = Frame {
+            view_id: 1,
+            size,
+            kind,
+            camera,
+            shade: shade(s),
+            visible: s.doc.project.texture_sets.iter().map(|t| t.visible).collect(),
+            overlay: Vec::new(),
+        };
         self.h.render(&frame)
     }
 

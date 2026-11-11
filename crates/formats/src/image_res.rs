@@ -107,10 +107,11 @@ mod tests {
 
     #[test]
     fn decode_image_caps_texels_at_the_side_limit_squared() {
-        assert_eq!(MAX_DECODE_TEXELS, 1 << 28);
         let mut png = Vec::new();
         image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        assert!(decode_image_within(&png, MAX_DECODE_TEXELS).is_ok());
+
+        assert_eq!(MAX_DECODE_TEXELS, 1 << 28);
+        assert_eq!(decode_image(&png).unwrap(), decode_image_within(&png, MAX_DECODE_TEXELS).unwrap());
         assert!(matches!(decode_image_within(&png, 3), Err(FormatError::TooLarge(_))));
     }
 }

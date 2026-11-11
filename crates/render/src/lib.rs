@@ -24,6 +24,7 @@ pub mod headless;
 mod high_poly_gpu;
 pub mod ibl;
 pub mod mesh_maps;
+pub mod overlay_quad;
 pub mod readback;
 pub mod renderer;
 pub mod set_highlight;
@@ -32,6 +33,7 @@ pub mod trace;
 mod uv_seam_gpu;
 
 pub use bake_visualization::BakeVisualization;
+pub use overlay_quad::OverlayQuad;
 pub use renderer::{COLOR_FORMAT, Frame, MSAA, Renderer, Shade, ViewKind, aux_size, uv_view_scale};
 pub use set_highlight::SetHighlight;
 pub use wgpu;

@@ -682,6 +682,26 @@ fn fs_wire3d(i: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.35, 0.35, 0.35, 0.45);
 }
 
+// How far overlay quads move toward the eye, as a fraction of their distance (as the wireframe does)
+const OVERLAY_TOWARD_EYE: f32 = 0.002;
+
+// See-through overlay quads (the symmetry plane and the lines on the mesh): the color comes in the tangent slot, nudged toward the eye like the wireframe so lines on the surface win the depth test
+@vertex
+fn vs_overlay(v: VIn) -> VOut {
+    var o: VOut;
+    o.wpos = v.pos;
+    o.nrm = v.nrm;
+    o.tan = v.tan;
+    o.uv = v.uv;
+    o.clip = g.view_proj * vec4<f32>(v.pos + (g.eye.xyz - v.pos) * OVERLAY_TOWARD_EYE, 1.0);
+    return o;
+}
+
+@fragment
+fn fs_overlay(i: VOut) -> @location(0) vec4<f32> {
+    return i.tan;
+}
+
 // The highlighted set's edges: four copies of each line, shifted to the corners of the extra width, make it wider than one pixel
 @vertex
 fn vs_wire_highlight(v: VIn, @builtin(instance_index) copy: u32) -> VOut {

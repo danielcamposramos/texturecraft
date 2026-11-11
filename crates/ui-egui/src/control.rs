@@ -73,6 +73,7 @@ pub(crate) fn encode_png(w: u32, h: u32, rgba: Vec<u8>) -> Option<(u32, u32, Vec
 }
 
 pub fn handle(app: &mut TextureCraftApp, ctx: &egui::Context, method: &str, p: &Value) -> Value {
+    app.ui.prefs.apply_resource_limits();
     match method {
         "ping" => ok(json!("pong")),
         "ui.resize" => {
@@ -178,6 +179,7 @@ pub fn handle(app: &mut TextureCraftApp, ctx: &egui::Context, method: &str, p: &
             match serde_json::from_value(cur) {
                 Ok(ui) => {
                     app.ui = ui;
+                    app.ui.prefs.apply_resource_limits();
                     ok(Value::Null)
                 }
                 Err(e) => err(format!("invalid UI state: {e}")),

@@ -188,20 +188,28 @@ struct Loose<'f> {
     files: Vec<(String, Vec<u8>)>,
     /// Bytes of the texture files kept so far, plus the layer.
     total: u64,
+    max_bytes: u64,
 }
 
 impl Assets for Loose<'_> {
     fn asset(&mut self, asset: &str) -> Option<Vec<u8>> {
-        let name = below(asset);
-        if let Some((_, data)) = self.files.iter().find(|(n, _)| Some(n) == name.as_ref()) {
+        // Once over budget, later materials must not trigger more file reads or clones
+        if self.total > self.max_bytes {
+            return None;
+        }
+
+        let name = below(asset)?;
+        if let Some((_, data)) = self.files.iter().find(|(stored, _)| *stored == name) {
             return Some(data.clone());
         }
+
         let data = (self.found)(asset).filter(|d| d.len() as u64 <= MAX_TEXTURE_BYTES)?;
         self.total = self.total.saturating_add(data.len() as u64);
-        if self.total > MAX_MESH_FILE_BYTES {
-            return None; // over budget: stop collecting; reported in package()
+        if self.total > self.max_bytes {
+            return None;
         }
-        self.files.push((name?, data.clone()));
+
+        self.files.push((name, data.clone()));
         Some(data)
     }
 }
@@ -209,19 +217,25 @@ impl Assets for Loose<'_> {
 /// A loose layer whose materials use texture files, as a `.usdz` package holding it (first) and
 /// those files under their paths below its folder; None when `found` has none of them.
 pub(crate) fn package(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+    package_with_limit(file_name, bytes, found, MAX_MESH_FILE_BYTES)
+}
+
+fn package_with_limit(file_name: &str, bytes: &[u8], found: &mut dyn FnMut(&str) -> Option<Vec<u8>>, max_bytes: u64) -> Result<Option<Vec<u8>>> {
     crate::guard(KIND, || {
         let layer = read_layer(bytes)?;
-        let mut loose = Loose { found, files: Vec::new(), total: bytes.len() as u64 };
+        let mut loose = Loose { found, files: Vec::new(), total: bytes.len() as u64, max_bytes };
         let mut stage = Stage::new(&layer);
         for p in layer.prims.iter().filter(|p| p.type_name == "Material") {
             stage.base_color(&p.name, Some(&mut loose));
         }
-        if loose.files.is_empty() && loose.total <= MAX_MESH_FILE_BYTES {
-            return Ok(None);
-        }
-        if loose.total > MAX_MESH_FILE_BYTES {
+        if loose.total > max_bytes {
             return Err(FormatError::TooLarge("the USD layer and its textures exceed 2 GiB".into()));
         }
+
+        if loose.files.is_empty() {
+            return Ok(None);
+        }
+
         let leaf = std::path::Path::new(file_name).file_name().and_then(|n| n.to_str()).unwrap_or("layer.usd");
         crate::mesh_export::usd::usdz(leaf, bytes, &loose.files).map(Some)
     })

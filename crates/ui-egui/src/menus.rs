@@ -83,6 +83,12 @@ pub const CATALOG: &[Item] = &[
     it("Viewport", "Display next mesh map", "viewport.nextMeshMap", Some("B")),
     it("Viewport", "Display previous mesh map", "viewport.previousMeshMap", Some("Shift+B")),
     it("Viewport", "UV checker", "ui.uvChecker", None),
+    #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+    it("Viewport", "Enable 3D", "ui.stereo.toggle", None),
+    #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+    it("Viewport", "Render resolution per eye", "ui.stereo.resolution", None),
+    #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+    it("Viewport", "Desktop Display Settings", "ui.stereo.display", None),
     sep("Viewport"),
     it("Viewport", "Show entire mesh", "viewport.frame", Some("F")),
     sep("Viewport"),
@@ -165,6 +171,18 @@ pub fn invoke(app: &mut TextureCraftApp, ctx: &egui::Context, id: &str) {
         "ui.resetUi" => app.ui.adopt_layout(crate::UiState::default()),
         "ui.layout.save" => crate::windows::layout_file(app, true),
         "ui.layout.load" => crate::windows::layout_file(app, false),
+        #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+        "ui.stereo.toggle" => {
+            app.run("viewport.stereo", json!({"enabled":!app.session.stereo.enabled}));
+        }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+        "ui.stereo.resolution" => app.stereo.get_or_insert_with(Default::default).options_open = true,
+        #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+        "ui.stereo.display" => {
+            if let Err(error) = crate::stereo_view::display_settings() {
+                app.toast(error, true);
+            }
+        }
         "ui.uvChecker" => {
             app.run("viewport.view", json!({"mode": "uvChecker"}));
         }
@@ -237,6 +255,8 @@ fn menu_item(app: &mut TextureCraftApp, ctx: &egui::Context, ui: &mut egui::Ui, 
         b = b.shortcut_text(sc);
     }
     let checked = match item.id {
+        #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+        "ui.stereo.toggle" => Some(app.session.stereo.enabled),
         "ui.mode.paint" => Some(app.ui.mode == Mode::Painting),
         "ui.mode.bake" => Some(app.ui.mode == Mode::Baking),
         "ui.mode.render" => Some(app.ui.mode == Mode::Rendering),

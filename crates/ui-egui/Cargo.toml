@@ -60,3 +60,6 @@ egui_kittest = { version = "0.37", features = ["wgpu", "eframe"] }
 # Fallible setup of the exact GPU device used by rendering regression tests.
 pollster = "0.4"
 image = { workspace = true }
+
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
+craft-stereo-window = { workspace = true }

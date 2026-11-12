@@ -37,10 +37,12 @@ pub struct Language {
     pub english: &'static str,
 }
 
-const COUNT: usize = 10;
+const COUNT: usize = 12;
 
 pub static LANGUAGES: [Language; COUNT] = [
     Language { code: "en", name: "English", english: "English" },
+    Language { code: "pl", name: "Polski", english: "Polish" },
+    Language { code: "zh-Hant", name: "繁體中文", english: "Chinese (Traditional)" },
     Language { code: "fr", name: "Français", english: "French" },
     Language { code: "de", name: "Deutsch", english: "German" },
     Language { code: "es", name: "Español", english: "Spanish" },
@@ -102,8 +104,13 @@ pub fn trf(template: &str, args: &[(&str, &dyn Display)]) -> String {
 }
 
 /// The supported language for a locale such as "de-AT", "pt_BR.UTF-8" or "zh-Hant-TW" ("en" when
-/// none matches). Chinese locales get Simplified Chinese; Portuguese ones get Brazilian Portuguese.
+/// none matches). Chinese script and territory distinguish Traditional Chinese; Portuguese uses Brazilian Portuguese.
 pub fn language_for_locale(locale: &str) -> &'static str {
+    let normalized = locale.to_ascii_lowercase().replace('_', "-");
+    let parts: Vec<_> = normalized.split(['-', '.', '@']).collect();
+    if parts.first() == Some(&"zh") && parts.iter().any(|p| matches!(*p, "hant" | "tw" | "hk" | "mo")) {
+        return "zh-Hant";
+    }
     let lang = locale.split(['-', '_', '.', '@']).next().unwrap_or("").to_ascii_lowercase();
     match lang.as_str() {
         "pt" => "pt-BR",
@@ -295,7 +302,7 @@ mod tests",
         assert_eq!(trf("{a} of {b} {c}", &[("a", &1), ("b", &2)]), "1 of 2 {c}");
         assert_eq!(trf("{unclosed", &[]), "{unclosed");
         for (locale, code) in
-            [("de-AT", "de"), ("pt_PT.UTF-8", "pt-BR"), ("zh-Hant-TW", "zh-Hans"), ("ja", "ja"), ("ko_KR", "ko"), ("ar-EG", "ar"), ("nl-NL", "en"), ("", "en")]
+            [("de-AT", "de"), ("pt_PT.UTF-8", "pt-BR"), ("zh-Hant-TW", "zh-Hant"), ("ja", "ja"), ("ko_KR", "ko"), ("ar-EG", "ar"), ("nl-NL", "en"), ("", "en")]
         {
             assert_eq!(language_for_locale(locale), code, "{locale}");
         }

@@ -50,6 +50,8 @@ pub mod shelf;
 pub mod shelf_preview;
 mod soft_box;
 pub mod state;
+#[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+pub mod stereo_view;
 pub mod symmetry;
 pub mod theme;
 pub mod thumbs;
@@ -121,6 +123,8 @@ pub struct TextureCraftApp {
     /// Where `ui` is saved between runs
     ui_store: ui_state_store::UiStateStore,
     pub gpu: Option<gpu::GpuLink>,
+    #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+    pub stereo: Option<stereo_view::ModelView>,
     pub control: Option<std::sync::mpsc::Receiver<ControlRequest>>,
     pub toasts: Vec<Toast>,
     /// Texture sets the GPU could not hold, and the text of the one sticky toast naming them.
@@ -212,6 +216,8 @@ impl TextureCraftApp {
             ui,
             ui_store,
             gpu,
+            #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+            stereo: None,
             control: None,
             toasts: Vec::new(),
             gpu_memory: (Vec::new(), None),
@@ -728,6 +734,16 @@ impl eframe::App for TextureCraftApp {
         let panel_frame = if hide { egui::Frame::NONE.fill(tk.viewport) } else { egui::Frame::NONE.fill(tk.chrome).inner_margin(theme::GUTTER) };
         egui::CentralPanel::default().frame(panel_frame).show(ui, |ui| if hide { viewport::central(self, ui) } else { docking::show(self, ui) });
         windows::show(self, &ctx);
+        #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+        {
+            if self.session.stereo.enabled || self.stereo.is_some() {
+                let mut stereo = self.stereo.take().unwrap_or_default();
+                stereo.tick(self, &ctx);
+                if self.session.stereo.enabled || stereo.options_open {
+                    self.stereo = Some(stereo);
+                }
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         updates_ui::show(self, &ctx);
         toasts(self, &ctx);

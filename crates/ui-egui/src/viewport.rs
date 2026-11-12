@@ -1,7 +1,7 @@
 //! The 3D viewport and the 2D UV view: navigation, painting input, brush cursor and the GPU
 //! callbacks that render them.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use egui::emath::GuiRounding as _;
 use egui::{Color32, PointerButton, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -219,7 +219,7 @@ fn split_divider_grab(ui: &Ui, full: Rect, divider_x: f32) {
     ui.interact(zone, split_divider_id(ui), Sense::drag()).on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal);
 }
 
-fn shade(app: &TextureCraftApp) -> Shade {
+pub(crate) fn shade(app: &TextureCraftApp) -> Shade {
     let (view_mode, channel) = match app.session.view {
         _ if app.ui.mode == crate::state::Mode::Painting && app.session.quick_mask.editing && app.picking_id_color.is_none() => (2, 0),
         ViewMode::Material => (0, 0),
@@ -250,7 +250,7 @@ fn drop_highlight(app: &TextureCraftApp, ui: &Ui, response: &egui::Response) -> 
 }
 
 /// Show what the GPU side reported (each message once while its toast is up).
-fn gpu_report_toasts(app: &mut TextureCraftApp, reports: crate::gpu::GpuReports) {
+pub(crate) fn gpu_report_toasts(app: &mut TextureCraftApp, reports: crate::gpu::GpuReports) {
     let names: Vec<String> = reports.memory.iter().filter_map(|ts| app.session.doc.project.texture_sets.get(*ts).map(|t| t.name.clone())).collect();
     if !names.is_empty() {
         // One sticky notice for every set the GPU could not hold (they are not retried, so the
@@ -319,6 +319,7 @@ fn add_callback(app: &mut TextureCraftApp, ui: &Ui, rect: Rect, mut frame: Frame
     frame.shade.bake = bake.filter(|_| frame.kind == ViewKind::Scene);
     let scene = match (sync.0.take(), app.gpu.as_mut()) {
         (Some(aux), Some(gpu_link)) => {
+            gpu_link.current_sync(ui.ctx().cumulative_frame_nr());
             let sync_start_ms = crate::now_ms();
             let scene = gpu_link.sync(&mut app.session, aux, bake, u32::from(app.ui.prefs.viewport_texture.min(2)), f64::from(app.profiler.logic_ms));
             let reports = gpu_link.take_reports();
@@ -329,12 +330,12 @@ fn add_callback(app: &mut TextureCraftApp, ui: &Ui, rect: Rect, mut frame: Frame
             if app.session.caches.iter().any(|cache| !cache.upload.is_empty()) || app.gpu.as_ref().is_some_and(crate::gpu::GpuLink::bake_busy) {
                 ui.ctx().request_repaint();
             }
-            Some(scene)
+            app.gpu.as_mut().map(|gpu| gpu.remember_sync(ui.ctx().cumulative_frame_nr(), scene))
         }
         _ => None,
     };
 
-    let Some(gpu) = &app.gpu else {
+    let Some(_) = &app.gpu else {
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -345,7 +346,7 @@ fn add_callback(app: &mut TextureCraftApp, ui: &Ui, rect: Rect, mut frame: Frame
         return;
     };
 
-    let callback = ViewCallback { frame, sync: Mutex::new(scene), rect, lost: gpu.lost.clone() };
+    let callback = ViewCallback { frame, sync: scene, rect };
     ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, callback));
 }
 
@@ -775,7 +776,7 @@ const QUICK_MASK_NOTICE_TEXT_SIZE: f32 = 12.0;
 const QUICK_MASK_NOTICE_COLOR: Color32 = Color32::from_rgb(0xe8, 0x6a, 0x6a);
 
 /// What bake mode's 3D view draws besides the low poly (nothing in the other modes)
-fn bake_visualization(app: &TextureCraftApp) -> Option<texturecraft_render::BakeVisualization> {
+pub(crate) fn bake_visualization(app: &TextureCraftApp) -> Option<texturecraft_render::BakeVisualization> {
     // Setup meshes can cover the low-poly map preview; keep the switches for when setup resumes
     if app.ui.mode != crate::state::Mode::Baking || app.session.bake_preview_active() {
         return None;

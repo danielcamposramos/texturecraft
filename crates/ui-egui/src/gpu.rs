@@ -94,6 +94,7 @@ pub struct GpuLink {
     /// Most tiles waiting to be composited since compositing last caught up (progress).
     composite_total: usize,
     bake_scene: BakeSceneLink,
+    scene_sync: Option<(u64, Arc<SceneSyncSlot>)>,
 }
 
 /// Compositing time per frame: a full recomposite of a large texture set spreads over frames.
@@ -141,6 +142,7 @@ pub fn init(rs: &egui_wgpu::RenderState, ctx: &egui::Context) -> GpuLink {
         adapter: format!("{} ({:?})", info.name, info.backend),
         composite_total: 0,
         bake_scene: BakeSceneLink::default(),
+        scene_sync: None,
     }
 }
 
@@ -305,18 +307,8 @@ const MASK_VIEW_FALLBACK_RESOLUTION: u32 = 1024;
 pub struct ViewCallback {
     pub frame: Frame,
     /// Scene changes, applied by the first view drawn this frame.
-    pub sync: Mutex<Option<SceneSync>>,
+    pub sync: Option<Arc<SceneSyncSlot>>,
     pub rect: egui::Rect,
-    /// [`GpuLink::lost`].
-    pub lost: Arc<AtomicBool>,
-}
-
-impl Drop for ViewCallback {
-    fn drop(&mut self) {
-        if self.sync.get_mut().unwrap_or_else(PoisonError::into_inner).is_some() {
-            self.lost.store(true, Ordering::Release);
-        }
-    }
 }
 
 impl CallbackTrait for ViewCallback {
@@ -329,67 +321,14 @@ impl CallbackTrait for ViewCallback {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(gpu) = resources.get_mut::<GpuState>() else { return Vec::new() };
-        let sync = self.sync.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let sync = self.sync.as_ref().and_then(|slot| slot.take());
         if let Some(sync) = sync {
-            if let Some((env, image)) = &sync.env {
-                gpu.renderer.set_environment(device, queue, env, image.as_deref());
-            }
-            if let Some((mesh, id)) = &sync.mesh {
-                gpu.renderer.set_mesh(device, queue, mesh, *id);
-            }
-            if let Some((sets, material_count, shift)) = &sync.sets {
-                gpu.renderer.set_display_shift(*shift);
-                let reset = gpu.renderer.set_texture_sets(device, queue, sets, *material_count);
-                if !reset.is_empty() {
-                    gpu.reset.store(true, Ordering::Release);
-                }
-            }
-            for (texture_set, kind, tile_x, tile_y, bytes) in &sync.tiles {
-                gpu.renderer.upload_tile(device, queue, *texture_set, *kind, *tile_x, *tile_y, bytes);
-            }
-            for (texture_set, size, bytes) in &sync.aux {
-                gpu.renderer.upload_aux(device, queue, *texture_set, *size, bytes);
-            }
-            if let Some((high, id)) = &sync.bake_high
-                && let Err(error) = gpu.renderer.set_bake_high(device, queue, high.as_deref(), *id)
-            {
-                let mut reports = gpu.reports.lock().unwrap_or_else(PoisonError::into_inner);
-                if reports.errors.len() < MAX_GPU_ERRORS && !reports.errors.contains(&error) {
-                    reports.errors.push(error);
-                }
-                gpu.ctx.request_repaint();
-            }
-            if let Some((id, missed)) = &sync.bake_high_missed {
-                gpu.renderer.set_bake_high_missed(queue, *id, missed);
-            }
-            if let Some(count) = sync.bake_cage_count {
-                gpu.renderer.truncate_bake_cages(count);
-            }
-            for (texture_set, cage, topology) in &sync.bake_cages {
-                let cage = cage.as_ref().map(|upload| (upload.corners.as_slice(), upload.shell.edges.as_slice()));
-                gpu.renderer.set_bake_cage(device, queue, *texture_set, cage, *topology);
-            }
-            if let Some((mesh_id, seams)) = &sync.uv_seams {
-                gpu.renderer.set_uv_seams(device, queue, *mesh_id, seams);
-            }
+            gpu.apply_sync(device, queue, sync);
         }
 
         // Also installs (or rejects) full-size textures WebGPU answered for since last frame
         gpu.renderer.prepare(device, queue, encoder, &self.frame);
-        let failed = gpu.renderer.take_memory_failures();
-        if !failed.is_empty() {
-            let mut reports = gpu.reports.lock().unwrap_or_else(PoisonError::into_inner);
-            for texture_set in failed {
-                if !reports.memory.contains(&texture_set) {
-                    reports.memory.push(texture_set);
-                }
-            }
-            // This frame's report drain already ran: the next frame shows the toast
-            gpu.ctx.request_repaint();
-        }
-        if gpu.renderer.awaiting_gpu() {
-            gpu.ctx.request_repaint();
-        }
+        gpu.report_pending();
 
         let pixels_per_point = screen.pixels_per_point;
         let rect = self.rect;
@@ -408,5 +347,124 @@ impl CallbackTrait for ViewCallback {
         pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
         pass.set_scissor_rect(clip.left_px.max(0) as u32, clip.top_px.max(0) as u32, clip.width_px as u32, clip.height_px as u32);
         gpu.renderer.blit_prepared(pass, self.frame.view_id);
+    }
+}
+
+/// Final-owner tracking: a clipped ordinary view can hand its sync to the native companion.
+pub struct SceneSyncSlot {
+    sync: Mutex<Option<SceneSync>>,
+    lost: Arc<AtomicBool>,
+}
+
+impl SceneSyncSlot {
+    pub fn take(&self) -> Option<SceneSync> {
+        self.sync.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+impl Drop for SceneSyncSlot {
+    fn drop(&mut self) {
+        if self.sync.get_mut().unwrap_or_else(PoisonError::into_inner).is_some() {
+            self.lost.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl GpuLink {
+    pub fn current_sync(&mut self, frame: u64) -> Option<Arc<SceneSyncSlot>> {
+        if self.scene_sync.as_ref().is_some_and(|(number, _)| *number != frame) {
+            self.scene_sync = None;
+        }
+        self.scene_sync.as_ref().map(|(_, slot)| slot.clone())
+    }
+
+    pub fn remember_sync(&mut self, frame: u64, sync: SceneSync) -> Arc<SceneSyncSlot> {
+        let slot = Arc::new(SceneSyncSlot { sync: Mutex::new(Some(sync)), lost: self.lost.clone() });
+        self.scene_sync = Some((frame, slot.clone()));
+        slot
+    }
+}
+
+impl GpuState {
+    pub fn apply_sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, sync: SceneSync) {
+        if let Some((env, image)) = &sync.env {
+            self.renderer.set_environment(device, queue, env, image.as_deref());
+        }
+        if let Some((mesh, id)) = &sync.mesh {
+            self.renderer.set_mesh(device, queue, mesh, *id);
+        }
+        if let Some((sets, material_count, shift)) = &sync.sets {
+            self.renderer.set_display_shift(*shift);
+            let reset = self.renderer.set_texture_sets(device, queue, sets, *material_count);
+            if !reset.is_empty() {
+                self.reset.store(true, Ordering::Release);
+            }
+        }
+        for (texture_set, kind, tile_x, tile_y, bytes) in &sync.tiles {
+            self.renderer.upload_tile(device, queue, *texture_set, *kind, *tile_x, *tile_y, bytes);
+        }
+        for (texture_set, size, bytes) in &sync.aux {
+            self.renderer.upload_aux(device, queue, *texture_set, *size, bytes);
+        }
+        if let Some((high, id)) = &sync.bake_high
+            && let Err(error) = self.renderer.set_bake_high(device, queue, high.as_deref(), *id)
+        {
+            let mut reports = self.reports.lock().unwrap_or_else(PoisonError::into_inner);
+            if reports.errors.len() < MAX_GPU_ERRORS && !reports.errors.contains(&error) {
+                reports.errors.push(error);
+            }
+            self.ctx.request_repaint();
+        }
+        if let Some((id, missed)) = &sync.bake_high_missed {
+            self.renderer.set_bake_high_missed(queue, *id, missed);
+        }
+        if let Some(count) = sync.bake_cage_count {
+            self.renderer.truncate_bake_cages(count);
+        }
+        for (texture_set, cage, topology) in &sync.bake_cages {
+            let cage = cage.as_ref().map(|upload| (upload.corners.as_slice(), upload.shell.edges.as_slice()));
+            self.renderer.set_bake_cage(device, queue, *texture_set, cage, *topology);
+        }
+        if let Some((mesh_id, seams)) = &sync.uv_seams {
+            self.renderer.set_uv_seams(device, queue, *mesh_id, seams);
+        }
+    }
+}
+
+impl GpuState {
+    pub fn report_pending(&mut self) {
+        let failed = self.renderer.take_memory_failures();
+        if !failed.is_empty() {
+            let mut reports = self.reports.lock().unwrap_or_else(PoisonError::into_inner);
+            for texture_set in failed {
+                if !reports.memory.contains(&texture_set) {
+                    reports.memory.push(texture_set);
+                }
+            }
+            // This frame's report drain already ran: the next frame shows the toast
+            self.ctx.request_repaint();
+        }
+        if self.renderer.awaiting_gpu() {
+            self.ctx.request_repaint();
+        }
+    }
+}
+
+#[cfg(test)]
+mod sync_slot_tests {
+    use super::*;
+    #[test]
+    fn only_the_final_unapplied_owner_marks_a_lost_sync() {
+        let lost = Arc::new(AtomicBool::new(false));
+        let slot = Arc::new(SceneSyncSlot { sync: Mutex::new(Some(SceneSync::default())), lost: lost.clone() });
+        let native = slot.clone();
+        drop(slot);
+        assert!(!lost.load(Ordering::Acquire));
+        assert!(native.take().is_some());
+        assert!(native.take().is_none());
+        drop(native);
+        assert!(!lost.load(Ordering::Acquire));
+        drop(SceneSyncSlot { sync: Mutex::new(Some(SceneSync::default())), lost: lost.clone() });
+        assert!(lost.load(Ordering::Acquire));
     }
 }

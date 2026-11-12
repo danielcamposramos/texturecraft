@@ -47,7 +47,7 @@ impl Script {
     pub fn of_language(code: &str) -> Option<Script> {
         match code {
             "ja" => Some(Script::Japanese),
-            "zh-Hans" => Some(Script::Chinese),
+            "zh-Hans" | "zh-Hant" => Some(Script::Chinese),
             "ko" => Some(Script::Korean),
             "ar" => Some(Script::Arabic),
             _ => None,

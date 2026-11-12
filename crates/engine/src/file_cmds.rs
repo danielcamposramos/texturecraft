@@ -3,8 +3,8 @@
 
 use serde_json::{Value, json};
 #[cfg(not(target_arch = "wasm32"))]
-use texturecraft_core::{NormalFormat, PROJECT_EXT};
-use texturecraft_core::{Project, TextureSet};
+use texturecraft_core::PROJECT_EXT;
+use texturecraft_core::{Fill, Layer, LayerKind, NormalFormat, Project, Source, TextureSet};
 use texturecraft_formats::{ExportInput, ExportOptions, ExportedFile, FileFormat, Padding, ProjectFile};
 use texturecraft_geom::{Mesh, primitives};
 
@@ -152,6 +152,12 @@ impl Session {
         s.doc.project.mesh_file = leaf_of(file_name);
         s.doc.project.cameras = imported.cameras;
         s.log.extend(imported.report.warnings.iter().cloned());
+        for m in &imported.materials {
+            if let Err(e) = s.add_material_fill(m) {
+                s.log.push(format!("the textures of {}: {e}", m.material));
+            }
+        }
+        s.sync_images();
         s.log.push(format!(
             "Imported {} ({} triangles, {} materials{})",
             file_name,
@@ -160,6 +166,37 @@ impl Session {
             if imported.report.uvs_generated { ", UVs generated" } else { "" }
         ));
         Ok(s)
+    }
+
+    /// A fill layer at the bottom of material `m`'s texture set, from the textures the mesh file
+    /// gives the material (stored as image resources).
+    fn add_material_fill(&mut self, m: &texturecraft_formats::MaterialTextures) -> Result<()> {
+        let Some(ts) = self.mesh.materials.iter().position(|n| *n == m.material).and_then(|i| self.texture_set_of_material(i)) else { return Ok(()) };
+        let maps = m.maps();
+        self.log.extend(maps.warnings);
+        if maps.images.is_empty() {
+            return Ok(());
+        }
+        let stem = texturecraft_formats::sanitize_resource_name(&m.material);
+        let mut fill = Fill::default();
+        for (c, bytes, ext) in maps.images {
+            let base = format!("{stem}_{}.{ext}", c.id());
+            let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{n}_{base}") }).find(|n| !self.doc.resources.contains_key(n)).unwrap_or(base);
+            self.doc.resources.insert(name.clone(), std::sync::Arc::new(bytes));
+            fill.sources.insert(c, Source::image(name));
+        }
+        for (c, v) in maps.values {
+            fill.sources.entry(c).or_insert(Source::Uniform(v));
+        }
+        let channels: Vec<_> = fill.sources.keys().copied().collect();
+        for c in &channels {
+            crate::set_cmds::add_channel(self, ts, *c)?;
+        }
+        let id = self.doc.project.alloc_id();
+        let name = self.doc.project.next_layer_name(ts, &m.material);
+        self.doc.project.layers.insert(id, Layer::new(id, name, LayerKind::Fill(fill), &channels));
+        self.doc.project.texture_set_mut(ts)?.stack.insert(0, id);
+        Ok(())
     }
 
     /// Open a `.tcraft` project from bytes.

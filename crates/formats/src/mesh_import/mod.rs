@@ -11,6 +11,7 @@ mod dae;
 mod external;
 mod fbx;
 mod gltf;
+mod material;
 mod obj;
 mod ply;
 #[cfg(test)]
@@ -33,6 +34,7 @@ use crate::{FormatError, Result};
 #[cfg(not(target_arch = "wasm32"))]
 pub use external::read_mesh_file;
 pub use external::{MeshFile, self_contained_mesh};
+pub use material::{MaterialMaps, MaterialTextures};
 
 /// Mesh files larger than this are refused before reading.
 pub const MAX_MESH_FILE_BYTES: u64 = 2 << 30;
@@ -53,6 +55,9 @@ pub struct ImportedMesh {
     pub report: MeshReport,
     /// Cameras of the file (glTF, FBX, COLLADA, USD), as orbit cameras around the mesh.
     pub cameras: Vec<texturecraft_core::Camera>,
+    /// Materials with embedded textures (glTF PBR inputs; base color textures of the other
+    /// formats), by material name.
+    pub materials: Vec<MaterialTextures>,
 }
 
 /// Most entries of a zip package (usdz, an FBX with its textures).
@@ -135,6 +140,8 @@ pub(crate) struct RawMesh {
     pub cameras: Vec<RawCamera>,
     /// Materials whose base color is not plain white (glTF).
     pub base_colors: Vec<RawBaseColor>,
+    /// Materials' other PBR inputs (glTF; base colors are in `base_colors`).
+    pub materials: Vec<MaterialTextures>,
     /// Vertex pairs (smaller first) that [`RawMesh::polygon`] added to split polygons.
     pub diagonals: HashSet<(u32, u32)>,
 }
@@ -455,6 +462,7 @@ fn geometry(raw: RawMesh) -> Result<(Mesh, Vec<String>, Option<Vec<Vec2>>)> {
 pub(crate) fn finish(mut raw: RawMesh) -> Result<ImportedMesh> {
     let mut raw_cameras = std::mem::take(&mut raw.cameras);
     raw_cameras.truncate(MAX_CAMERAS);
+    let materials = material_textures(std::mem::take(&mut raw.materials), std::mem::take(&mut raw.base_colors));
     let (mut mesh, mut warnings, uvs) = geometry(raw)?;
     let uvs_generated = match uvs {
         Some(uv) if uv.len() == mesh.positions.len() => {
@@ -474,7 +482,26 @@ pub(crate) fn finish(mut raw: RawMesh) -> Result<ImportedMesh> {
     mesh.validate()?;
     let report = report(&mesh, uvs_generated, warnings);
     let cameras = orbit_cameras(&raw_cameras, &mesh);
-    Ok(ImportedMesh { mesh, report, cameras })
+    Ok(ImportedMesh { mesh, report, cameras, materials })
+}
+
+/// `materials` with their base colors, keeping those that have a texture.
+fn material_textures(mut materials: Vec<MaterialTextures>, base_colors: Vec<RawBaseColor>) -> Vec<MaterialTextures> {
+    for c in base_colors {
+        let i = match materials.iter().position(|m| m.material == c.material) {
+            Some(i) => i,
+            None => {
+                materials.push(MaterialTextures { material: c.material.clone(), ..MaterialTextures::default() });
+                materials.len() - 1
+            }
+        };
+        if let Some(m) = materials.get_mut(i) {
+            m.base_color = Some(c.factor);
+            m.base_color_image = c.image;
+        }
+    }
+    materials.retain(MaterialTextures::has_images);
+    materials
 }
 
 /// File cameras as orbit cameras: the target is where the view axis passes the mesh center

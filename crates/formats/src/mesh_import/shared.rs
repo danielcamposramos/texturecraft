@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use craft_mesh::{Camera, Error as MeshError, Limits, Projection, Scene, no_external};
 use texturecraft_geom::glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
 
-use super::{Corner, PolygonSink, RawBaseColor, RawCamera, RawMesh};
+use super::{Corner, MaterialTextures, PolygonSink, RawBaseColor, RawCamera, RawMesh};
 use crate::{FormatError, Result, malformed};
 
 pub(crate) fn obj(bytes: &[u8]) -> Result<RawMesh> {
@@ -125,17 +125,41 @@ fn mapped_corner(mesh: &craft_mesh::Mesh, c: craft_mesh::Corner, world: Mat4, no
 fn add_materials(scene: &Scene, raw: &mut RawMesh) {
     let mut added = HashSet::new();
     for (index, material) in scene.materials.iter().enumerate() {
-        let texture = material.base_color_texture;
-        let image = texture.and_then(|t| scene.images.get(t.image)).and_then(|i| i.data.clone());
-        let factor = Vec4::new(material.base_color[0], material.base_color[1], material.base_color[2], material.base_color[3]);
         let material_name = if material.name.is_empty() { format!("Material_{index}") } else { material.name.clone() };
-        if (image.is_some() || factor != Vec4::ONE) && added.insert(material_name.clone()) {
-            if let Some(t) = texture.filter(|t| t.uv_set != 0) {
-                raw.warnings.push(format!("the base color texture of {material_name} uses UV set {}; only the first is read", t.uv_set));
-            }
-            raw.base_colors.push(RawBaseColor { material: material_name, factor, image });
+        if !added.insert(material_name.clone()) {
+            continue;
         }
+        let base_color = Vec4::from_array(material.base_color);
+        let base_color_image = texture_bytes(scene, material.base_color_texture, &material_name, "base color", raw);
+        let metallic_roughness_image = texture_bytes(scene, material.metallic_roughness_texture, &material_name, "metallic/roughness", raw);
+        let normal_image = texture_bytes(scene, material.normal_texture, &material_name, "normal", raw);
+        let occlusion_image = texture_bytes(scene, material.occlusion_texture, &material_name, "occlusion", raw);
+        let emissive_image = texture_bytes(scene, material.emissive_texture, &material_name, "emissive", raw);
+        if base_color_image.is_some() || base_color != Vec4::ONE {
+            raw.base_colors.push(RawBaseColor { material: material_name.clone(), factor: base_color, image: base_color_image.clone() });
+        }
+        raw.materials.push(MaterialTextures {
+            material: material_name,
+            base_color: Some(base_color),
+            base_color_image,
+            metallic: Some(material.metallic),
+            roughness: Some(material.roughness),
+            metallic_roughness_image,
+            normal_image,
+            occlusion_image,
+            emissive: Some(Vec3::from_array(material.emissive)),
+            emissive_image,
+        });
     }
+}
+
+fn texture_bytes(scene: &Scene, texture: Option<craft_mesh::TextureRef>, material: &str, slot: &str, raw: &mut RawMesh) -> Option<Vec<u8>> {
+    let texture = texture?;
+    if texture.uv_set != 0 {
+        raw.warnings.push(format!("the {slot} texture of {material} uses UV set {}; only the first is read", texture.uv_set));
+        return None;
+    }
+    scene.images.get(texture.image).and_then(|image| image.data.clone())
 }
 
 fn add_cameras(scene: &Scene, raw: &mut RawMesh, limits: &Limits) -> Result<()> {

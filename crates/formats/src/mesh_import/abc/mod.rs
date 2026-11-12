@@ -542,7 +542,7 @@ impl Walk<'_, '_> {
                         Vec2::ZERO
                     }
                 });
-                corners.push(Corner { p: *p, n, uv });
+                corners.push(Corner { p: *p, n, uv, color: None });
             }
             k = end;
             if !keep_order {

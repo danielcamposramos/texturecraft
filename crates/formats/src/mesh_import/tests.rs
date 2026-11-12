@@ -94,7 +94,12 @@ fn assert_outward(m: &Mesh) {
     for t in 0..m.triangle_count() {
         let [a, b, c] = m.tri(t).unwrap();
         let face = (m.positions[b] - m.positions[a]).cross(m.positions[c] - m.positions[a]);
-        assert!(face.dot(m.normals[a]) > 0.0, "triangle {t} winding disagrees with its normal");
+        assert!(
+            face.dot(m.normals[a]) > 0.0,
+            "triangle {t} winding disagrees with its normal: face={face:?}, normal={:?}, positions={:?}",
+            m.normals[a],
+            [m.positions[a], m.positions[b], m.positions[c]]
+        );
     }
 }
 
@@ -222,6 +227,15 @@ fn obj_flips_v_and_keeps_usemtl_materials() {
     }
     assert_outward(m);
     m.validate().unwrap();
+}
+
+#[test]
+fn obj_bare_usemtl_uses_default_material_and_keeps_faces() {
+    for src in [&b"v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl \nf 1 2 3\n"[..], b"v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl\nf 1 2 3\n"] {
+        let imported = import_mesh_bytes("bare.obj", src).unwrap();
+        assert_eq!(imported.mesh.materials, ["Default"]);
+        assert_eq!(imported.mesh.triangle_count(), 1);
+    }
 }
 
 #[test]
@@ -482,6 +496,28 @@ fn high_poly_import_skips_unwrap_and_rejects_garbage() {
     assert!(import_high_poly_bytes("x.obj", b"v 0 0 0\nv nan 1 0\nv 0 1 0\nf 1 2 3\n").is_err());
     assert!(import_high_poly_bytes("x.ply", b"ply\nformat ascii 1.0\nelement vertex 99999999\n").is_err());
     assert!(import_high_poly_bytes("x.txt", b"").is_err());
+}
+
+#[test]
+fn gltf_embedded_base_color_material_reaches_high_poly() {
+    let color = [31, 97, 181, 223];
+    let image = image::RgbaImage::from_pixel(1, 1, image::Rgba(color));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png).unwrap();
+
+    let mut doc: serde_json::Value = serde_json::from_slice(&embedded_gltf()).unwrap();
+    doc["materials"][0]["pbrMetallicRoughness"] = serde_json::json!({
+        "baseColorFactor": [0.25, 0.5, 0.75, 1.0],
+        "baseColorTexture": { "index": 0 }
+    });
+    doc["textures"] = serde_json::json!([{ "source": 0 }]);
+    doc["images"] = serde_json::json!([{ "uri": format!("data:image/png;base64,{}", base64(png.get_ref())) }]);
+
+    let imported = import_high_poly_bytes("scene.gltf", &serde_json::to_vec(&doc).unwrap()).unwrap();
+    let red = imported.mesh.materials.iter().position(|name| name == "Red").unwrap();
+    let base = imported.base_color[red].as_ref().unwrap();
+    assert_eq!(base.factor, Vec4::new(0.25, 0.5, 0.75, 1.0));
+    assert_eq!((base.width, base.height, base.texels[0]), (1, 1, color));
 }
 
 /// The embedded scene plus a perspective camera looking at the triangle along -Z and an unnamed

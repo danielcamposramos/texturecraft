@@ -817,7 +817,7 @@ fn add_geometry(sink: &mut PolygonSink, geometry: &Node, transform: Mat4, slots:
                 Vec2::ZERO
             }
         });
-        corners.push(Corner { p: *p, n, uv });
+        corners.push(Corner { p: *p, n, uv, color: None });
         if last || k + 1 == polygon_indices.len() {
             if flip {
                 corners.reverse();

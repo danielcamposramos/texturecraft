@@ -356,6 +356,7 @@ fn add_geometry(d: &mut Doc, sink: &mut PolygonSink, geom: &El, m: Mat4, bind: &
                         p: m.transform_point3(Vec3::from(pos)),
                         n: n.map(|n| nm * Vec3::from(n)),
                         uv: t.map(|[u, v]| Vec2::new(u, 1.0 - v)),
+                        color: None,
                     });
                 }
                 next = next.saturating_add(size);

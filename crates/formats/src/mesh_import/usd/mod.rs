@@ -576,6 +576,7 @@ impl<'a> Stage<'a> {
                     p: m.transform_point3(Vec3::from(p)),
                     n: normals.as_ref().and_then(|pv| pv.get::<3>(at)).map(|v| nm * Vec3::from(v)),
                     uv: uvs.as_ref().and_then(|pv| pv.get::<2>(at)).map(|[u, v]| Vec2::new(u, 1.0 - v)),
+                    color: None,
                 });
             }
             if flip {

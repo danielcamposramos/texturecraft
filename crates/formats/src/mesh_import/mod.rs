@@ -15,6 +15,7 @@ mod obj;
 mod ply;
 #[cfg(test)]
 mod scene_tests;
+mod shared;
 mod stl;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -182,6 +183,7 @@ pub(crate) struct Corner {
     pub p: Vec3,
     pub n: Option<Vec3>,
     pub uv: Option<Vec2>,
+    pub color: Option<Vec4>,
 }
 
 /// Collects polygons into a [`RawMesh`]: fan triangulation, one vertex per unique corner, and
@@ -193,10 +195,12 @@ pub(crate) struct PolygonSink {
     raw: RawMesh,
     normals: Vec<Vec3>,
     uvs: Vec<Vec2>,
+    colors: Vec<Vec4>,
     missing_normals: bool,
     missing_uvs: bool,
     some_uvs: bool,
-    ids: HashMap<[u32; 8], u32>,
+    some_colors: bool,
+    ids: HashMap<[u32; 12], u32>,
     polygon: Vec<u32>,
     triangles: usize,
 }
@@ -213,8 +217,9 @@ impl PolygonSink {
             self.missing_normals |= c.n.is_none();
             self.missing_uvs |= c.uv.is_none();
             self.some_uvs |= c.uv.is_some();
-            let (n, uv) = (c.n.unwrap_or_default(), c.uv.unwrap_or_default());
-            let key = [c.p.x, c.p.y, c.p.z, n.x, n.y, n.z, uv.x, uv.y].map(f32::to_bits);
+            let (n, uv, color) = (c.n.unwrap_or_default(), c.uv.unwrap_or_default(), c.color.unwrap_or(Vec4::ONE));
+            let key = [c.p.x, c.p.y, c.p.z, n.x, n.y, n.z, uv.x, uv.y, color.x, color.y, color.z, color.w].map(f32::to_bits);
+            self.some_colors |= c.color.is_some();
             let id = match self.ids.entry(key) {
                 Entry::Occupied(e) => *e.get(),
                 Entry::Vacant(e) => {
@@ -223,6 +228,7 @@ impl PolygonSink {
                     self.raw.positions.push(c.p);
                     self.normals.push(n);
                     self.uvs.push(uv);
+                    self.colors.push(color);
                     *e.insert(id as u32)
                 }
             };
@@ -238,12 +244,26 @@ impl PolygonSink {
         }
     }
 
-    pub fn finish(mut self) -> RawMesh {
+    pub fn finish(self) -> RawMesh {
+        self.finish_with_partial_uv_defaults(false)
+    }
+
+    pub fn finish_obj(self) -> RawMesh {
+        self.finish_with_partial_uv_defaults(true)
+    }
+
+    fn finish_with_partial_uv_defaults(mut self, partial_uv_defaults: bool) -> RawMesh {
         if self.missing_uvs && self.some_uvs {
-            self.warn("some polygons have no UVs; the whole mesh was unwrapped automatically".into());
+            let warning = if partial_uv_defaults {
+                "some objects have no UVs; default UVs were assigned"
+            } else {
+                "some polygons have no UVs; the whole mesh was unwrapped automatically"
+            };
+            self.warn(warning.into());
         }
         self.raw.normals = (!self.missing_normals).then_some(self.normals);
-        self.raw.uvs = (!self.missing_uvs).then_some(self.uvs);
+        self.raw.uvs = (!self.missing_uvs || (partial_uv_defaults && self.some_uvs)).then_some(self.uvs);
+        self.raw.colors = self.some_colors.then_some(self.colors);
         self.raw
     }
 }

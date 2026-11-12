@@ -92,7 +92,7 @@ fn inline_gltf(bytes: Vec<u8>, found: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -
             if uri.starts_with("data:") {
                 continue;
             }
-            let path = super::gltf::percent_decode(uri).ok_or_else(|| malformed("glTF", format!("URI \"{uri}\" is not valid UTF-8")))?;
+            let path = percent_decode(uri).ok_or_else(|| malformed("glTF", format!("URI \"{uri}\" is not valid UTF-8")))?;
             let Some(data) = found(&path) else { continue };
             // Base64 grows the data by a third; the result must stay importable.
             total = total.saturating_add(data.len() as u64);
@@ -112,6 +112,27 @@ fn inline_gltf(bytes: Vec<u8>, found: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -
         return Ok(bytes);
     }
     serde_json::to_vec(&doc).map_err(|e| FormatError::Invalid(e.to_string()))
+}
+
+/// Percent-decoded asset paths must be UTF-8 before they can be resolved below the mesh folder.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let hex = |k: usize| b.get(k).and_then(|h| (*h as char).to_digit(16));
+        match (c, hex(i + 1), hex(i + 2)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn image_mime(path: &str) -> &'static str {

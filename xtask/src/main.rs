@@ -15,7 +15,7 @@ usage: cargo xtask <command>
 commands:
   layers          enforce the crate dependency layering (xtask/src/layers.rs)
   wasm            cargo check --target wasm32-unknown-unknown for the wasm crates and the web app
-  ci              fmt --check, clippy -D warnings, test, layers, wasm (stops at the first failure)
+  ci              fmt --check, layers, clippy -D warnings, test, wasm (stops at the first failure)
   version [set X.Y.Z[-pre]]
                   print the workspace version, or set it (Cargo.toml + Cargo.lock)
   ico <out.ico> <in.png>...
@@ -154,11 +154,12 @@ fn cmd_ci() -> Result<(), String> {
         }
     };
     type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
+    // Reject invalid dependency layering before spending time compiling and running the workspace.
     let steps: Vec<Step> = vec![
         ("fmt", Box::new(cargo_step(&["fmt", "--all", "--", "--check"]))),
+        ("layers", Box::new(cmd_layers)),
         ("clippy", Box::new(cargo_step(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
         ("test", Box::new(cargo_step(&["test", "--workspace"]))),
-        ("layers", Box::new(cmd_layers)),
         ("wasm", Box::new(cmd_wasm)),
     ];
     for (i, (name, step)) in steps.iter().enumerate() {

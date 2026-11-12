@@ -24,7 +24,6 @@ jobs:
       # Same craft-fonts commit as release.yml.
       craft-fonts-ref: aced4137c022f1f587624d48e81ec77e1914a9cc
       os: '["ubuntu-24.04","windows-latest"]'
-      toolchain: "1.96.0"
       # xtask ci runs cargo test (including doctests), not cargo nextest.
       tools: ""
       packages: >-

@@ -12,6 +12,7 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/texturecraft"
 
 [workspace.dependencies]
+craft-stereo-camera = { path = "../craft-libs/crates/stereo-camera" }
 # internal
 texturecraft-core = { path = "crates/core" }
 texturecraft-texel = { path = "crates/texel" }

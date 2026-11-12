@@ -1,5 +1,6 @@
 /// The high poly bake mode draws over the low poly
 pub(crate) struct HighPolyGpu {
+    pub(crate) bounds: Option<(texturecraft_geom::glam::Vec3, texturecraft_geom::glam::Vec3)>,
     /// Which mesh the buffers hold
     pub(crate) id: u64,
     pub(crate) vertices: wgpu::Buffer,

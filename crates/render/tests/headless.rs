@@ -900,3 +900,148 @@ fn painted_placeholders_render_like_full_textures() {
     let [r1, g1, _] = red.at(w / 2, hgt / 2);
     assert!(r1 > r0 && g1 < g0, "the painted base color shows: {:?} → {:?}", before.at(w / 2, hgt / 2), red.at(w / 2, hgt / 2));
 }
+
+/// Ordinary runs retain the existing optional-adapter behavior; the stereo proof gate
+/// explicitly requires lavapipe, so it cannot pass by returning without rendering.
+fn stereo_setup() -> Option<(Headless, Frame)> {
+    let result = setup();
+    if std::env::var("TEXTURECRAFT_TEST_GPU").as_deref() == Ok("software") {
+        let (headless, _) = result.as_ref().expect("the stereo gate requires a software Vulkan adapter");
+        let info = headless.device.adapter_info();
+        assert_eq!(info.backend, texturecraft_render::wgpu::Backend::Vulkan);
+        assert_eq!(info.device_type, texturecraft_render::wgpu::DeviceType::Cpu);
+        eprintln!("stereo proof adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+    }
+    result
+}
+
+#[test]
+fn stereo_cameras_keep_private_history_and_restore_the_mono_view() {
+    use craft_stereo_camera::{Budget, Camera, DepthRange, ProjectionKind};
+    let Some((mut h, mut frame)) = stereo_setup() else { return };
+    frame.shade.taa = true;
+    frame.shade.post_effects = true;
+    frame.shade.bloom = 0.3;
+    let before = frame.clone();
+    let ordinary = render(&mut h, &frame, "stereo_ordinary_before");
+    let cam = frame.camera;
+    let pair = Camera {
+        eye: cam.eye(),
+        view: cam.view(),
+        projection: cam.proj(480.0 / 360.0),
+        kind: ProjectionKind::Perspective,
+        infinity_projection_x: cam.proj(480.0 / 360.0).x_axis.x,
+        zero_depth: cam.distance,
+        depths: DepthRange { near: cam.distance * 0.7, far: cam.distance * 1.3 },
+        width: 480,
+        budget: Budget { sunk: 24.0, popped: 12.0 },
+    }
+    .pair()
+    .unwrap();
+    let mut draw = |id, eye: &craft_stereo_camera::EyeCamera| {
+        let f = Frame { view_id: id, ..frame.clone() };
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        h.renderer.prepare_camera(&h.device, &h.queue, &mut encoder, &f, Some(eye));
+        h.queue.submit([encoder.finish()]);
+        h.renderer.read_view(&h.device, &h.queue, id).unwrap().2
+    };
+    let left = draw(100, &pair.eyes[0]);
+    let right = draw(101, &pair.eyes[1]);
+    assert_ne!(left, right, "the two cameras must differ at finite model depths");
+    let changed = draw(100, &pair.eyes[1]);
+    assert_eq!(changed, right, "changed projection must reset only that view's temporal history");
+    assert_eq!(frame, before, "no central camera or frame state was edited");
+    // New id gives the exact same first sample as the pre-stereo ordinary view.
+    frame.view_id = 102;
+    assert_eq!(render(&mut h, &frame, "stereo_ordinary_after").px, ordinary.px);
+}
+
+#[test]
+fn stereo_budget_tracks_uploaded_displacement_and_its_removal() {
+    use craft_stereo_camera::Budget;
+    let Some((mut h, mut frame)) = stereo_setup() else { return };
+    frame.shade.displacement = true;
+    frame.shade.height_strength = 1.0;
+    let budget = Budget { sunk: 24.0, popped: 12.0 };
+    let before = h.renderer.camera_pair(&frame, budget).unwrap().baseline;
+    let pixel = |v: f32| {
+        let mut p = [0u8; 8];
+        p[..2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+        p
+    };
+    h.renderer.upload_tile(&h.device, &h.queue, 0, DisplayKind::Height, 0, 0, &pixel(20.0).repeat(64 * 64));
+    let raised = h.renderer.camera_pair(&frame, budget).unwrap().baseline;
+    assert!(raised < before, "actual displaced geometry must remain in the live budget");
+    h.renderer.upload_tile(&h.device, &h.queue, 0, DisplayKind::Height, 0, 0, &pixel(0.0).repeat(64 * 64));
+    assert_eq!(h.renderer.camera_pair(&frame, budget).unwrap().baseline, before, "removed height must not leave a historical depth envelope");
+}
+
+#[test]
+fn stereo_pair_copies_one_world_and_keeps_the_ordinary_target_private() {
+    use craft_stereo_camera::Budget;
+    let Some((mut h, mut frame)) = stereo_setup() else { return };
+    frame.shade.taa = false;
+    let original = frame.clone();
+    let mono = render(&mut h, &frame, "pair_mono_before");
+    let mut encoder = h.device.create_command_encoder(&Default::default());
+    let budget = Budget { sunk: 24.0, popped: 12.0 };
+    assert!(h.renderer.prepare_stereo(&h.device, &h.queue, &mut encoder, &frame, [1, 100], budget).is_err());
+    assert!(h.renderer.prepare_stereo(&h.device, &h.queue, &mut encoder, &frame, [100, 100], budget).is_err());
+    let pair = h.renderer.prepare_stereo(&h.device, &h.queue, &mut encoder, &frame, [100, 101], budget).unwrap();
+    let copies = [h.renderer.copy_view(&h.device, &mut encoder, 100).unwrap(), h.renderer.copy_view(&h.device, &mut encoder, 101).unwrap()];
+    h.queue.submit([encoder.finish()]);
+    for copy in &copies {
+        copy.map();
+    }
+    h.device.poll(texturecraft_render::wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    let images = copies.map(|copy| copy.take().unwrap().unwrap());
+    assert_eq!((images[0].0, images[0].1), (480, 360));
+    assert_eq!((images[1].0, images[1].1), (480, 360));
+    assert_ne!(images[0].2, images[1].2);
+    for (i, eye) in pair.eyes.iter().enumerate() {
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        let fresh = Frame { view_id: 102 + i as u64, ..frame.clone() };
+        h.renderer.prepare_camera(&h.device, &h.queue, &mut encoder, &fresh, Some(eye));
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(h.renderer.read_view(&h.device, &h.queue, fresh.view_id).unwrap().2, images[i].2);
+    }
+    assert_eq!(frame, original);
+    frame.view_id = 104;
+    assert_eq!(render(&mut h, &frame, "pair_mono_after").px, mono.px);
+}
+
+#[test]
+fn stereo_refuses_a_degenerate_environment_clip_range() {
+    let Some((h, mut frame)) = stereo_setup() else { return };
+    frame.camera = OrbitCamera { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, distance: 1e10, scene_radius: 1e-3, ortho: true, ..OrbitCamera::default() };
+    assert!(
+        h.renderer.camera_pair(&frame, craft_stereo_camera::Budget { sunk: 24.0, popped: 12.0 }).is_err(),
+        "the perspective environment near and far planes round to the same value even when the orthographic model projection is valid"
+    );
+}
+
+#[test]
+fn stereo_budget_includes_high_poly_and_updated_cage_geometry() {
+    use craft_stereo_camera::Budget;
+    let Some((mut h, mut frame)) = stereo_setup() else { return };
+    frame.camera = OrbitCamera { target: Vec3::ZERO, yaw: 0.0, pitch: 0.0, distance: 5.0, scene_radius: 1.5, ..OrbitCamera::default() };
+    let budget = Budget { sunk: 24.0, popped: 12.0 };
+    let before = h.renderer.camera_pair(&frame, budget).unwrap().baseline;
+    frame.shade.bake = Some(BakeVisualization { high_poly: true, cage: false, low_poly: true, uv_seams: false, only_set: None });
+    let mut high = primitives::material_ball();
+    for p in &mut high.positions {
+        *p = *p * 0.1 + Vec3::new(0.0, 0.0, 4.0);
+    }
+    h.renderer.set_bake_high(&h.device, &h.queue, Some(&high), 2).unwrap();
+    assert!(h.renderer.camera_pair(&frame, budget).unwrap().baseline < before);
+    h.renderer.set_bake_high(&h.device, &h.queue, None, 3).unwrap();
+    assert_eq!(h.renderer.camera_pair(&frame, budget).unwrap().baseline, before);
+    frame.shade.bake = Some(BakeVisualization { high_poly: false, cage: true, low_poly: true, uv_seams: false, only_set: Some(0) });
+    let corners = [Vec3::new(-0.1, -0.1, 4.0), Vec3::new(0.1, -0.1, 4.0), Vec3::new(0.1, 0.1, 4.0)];
+    let edges = [[0, 1], [1, 2], [2, 0]];
+    h.renderer.set_bake_cage(&h.device, &h.queue, 0, Some((&corners, &edges)), 1);
+    assert!(h.renderer.camera_pair(&frame, budget).unwrap().baseline < before);
+    let farther = corners.map(|p| Vec3::new(p.x, p.y, -1.0));
+    h.renderer.set_bake_cage(&h.device, &h.queue, 0, Some((&farther, &edges)), 1);
+    assert_eq!(h.renderer.camera_pair(&frame, budget).unwrap().baseline, before, "same-topology position updates must refresh their cached bounds");
+}

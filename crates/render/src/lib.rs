@@ -33,6 +33,7 @@ pub mod trace;
 mod uv_seam_gpu;
 
 pub use bake_visualization::BakeVisualization;
+pub use craft_stereo_camera as stereo;
 pub use overlay_quad::OverlayQuad;
 pub use renderer::{COLOR_FORMAT, Frame, MSAA, Renderer, Shade, ViewKind, aux_size, uv_view_scale};
 pub use set_highlight::SetHighlight;

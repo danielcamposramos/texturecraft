@@ -21,6 +21,10 @@
 //! the refracted ray leaves the view or shows nothing. Displacement draws a dense copy of the
 //! mesh ([`crate::subdivide`]) moved along its normals by the height channel in the vertex shader.
 
+mod stereo;
+
+use self::stereo::HeightBounds;
+use craft_stereo_camera::EyeCamera;
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
@@ -348,6 +352,7 @@ impl Tex {
 }
 
 struct SetGpu {
+    height: HeightBounds,
     /// Texels across and down (a UV-tiled set's whole atlas).
     size: (u32, u32),
     /// Display textures hold the set at `size >> shift`: halved until they fit the device.
@@ -425,6 +430,7 @@ struct Geometry {
 }
 
 struct MeshGpu {
+    bounds: (Vec3, Vec3),
     id: u64,
     geo: Geometry,
     /// The vertices and indices of a mesh coarse enough to subdivide for displacement, until
@@ -488,7 +494,7 @@ struct ViewTargets {
     /// Reads `hdr` for the accumulation blend.
     accum_bg: wgpu::BindGroup,
     /// What `accum` holds: the frame and content revision, and the sample count.
-    history: Option<(Frame, u64)>,
+    history: Option<(Frame, u64, Option<EyeCamera>)>,
     samples: u32,
     /// The display image (RGBA8, sRGB-encoded): post pass output, blit and read-back source.
     resolve: wgpu::Texture,
@@ -1245,7 +1251,7 @@ impl Renderer {
         let world_per_uv = subdivide::world_per_uv(&verts, &mesh.indices).unwrap_or(radius);
         let coarse = (subdivide::level_for(triangles) > 0).then(|| (verts, mesh.indices.clone()));
         let geo = Geometry { vb, ib, draws, triangles };
-        self.mesh = Some(MeshGpu { id, geo, coarse, dense: None, world_per_uv, lines, line_draws, center, radius });
+        self.mesh = Some(MeshGpu { bounds: (lo, hi), id, geo, coarse, dense: None, world_per_uv, lines, line_draws, center, radius });
         self.content_rev += 1;
     }
 
@@ -1271,6 +1277,7 @@ impl Renderer {
         }
 
         self.bake_high = Some(HighPolyGpu {
+            bounds: stereo::bounds(&mesh.positions),
             id,
             vertices: upload_buffer(device, queue, "tc_bake_high_vb", bytemuck::cast_slice(&subdivide::vertices(mesh)), wgpu::BufferUsages::VERTEX),
             vertex_count: mesh.positions.len(),
@@ -1300,9 +1307,11 @@ impl Renderer {
             (None, _) => *slot = None,
             (Some((corners, _)), Some(gpu)) if gpu.topology == topology && gpu.corner_count as usize == corners.len() => {
                 queue.write_buffer(&gpu.corners, 0, bytemuck::cast_slice(corners));
+                gpu.bounds = stereo::bounds(corners);
             }
             (Some((corners, edges)), _) => {
                 *slot = Some(CageGpu {
+                    bounds: stereo::bounds(corners),
                     topology,
                     corners: upload_buffer(device, queue, "tc_cage_vb", bytemuck::cast_slice(corners), wgpu::BufferUsages::VERTEX),
                     corner_count: corners.len() as u32,
@@ -1374,7 +1383,16 @@ impl Renderer {
             tex.push(neutral_tex(device, queue, (1, 1), wgpu::TextureFormat::Rgba8Unorm, 1, &AUX_NEUTRAL));
             let bind_group = set_bind_group(device, &self.set_bgl, &self.sampler, &tex);
             let n = tex.len();
-            let gpu = SetGpu { size, shift, tex, bind_group, mips_dirty: vec![true; n], failed: vec![false; n], pending: (0..n).map(|_| None).collect() };
+            let gpu = SetGpu {
+                height: HeightBounds::default(),
+                size,
+                shift,
+                tex,
+                bind_group,
+                mips_dirty: vec![true; n],
+                failed: vec![false; n],
+                pending: (0..n).map(|_| None).collect(),
+            };
             if i < self.sets.len() {
                 self.sets[i] = gpu;
             } else {
@@ -1442,6 +1460,9 @@ impl Renderer {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(n * bpt), rows_per_image: Some(n) },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        if kind == DisplayKind::Height {
+            set.height.record(tx, ty, w, h, n, data);
+        }
         // Innermost scope first.
         drop(invalid);
         drop(oom);
@@ -1716,7 +1737,7 @@ impl Renderer {
     }
 
     fn targets(&mut self, device: &wgpu::Device, id: u64, size: [u32; 2], bloom: bool, fx: bool, refraction: bool) -> Option<&mut ViewTargets> {
-        let size = [size[0].clamp(1, 8192), size[1].clamp(1, 8192)];
+        let size = [size[0].clamp(1, texturecraft_core::MAX_VIEW_SIDE), size[1].clamp(1, texturecraft_core::MAX_VIEW_SIDE)];
         if self.views.get(&id).is_none_or(|v| v.size != size) {
             let v = self.create_targets(device, size);
             self.views.insert(id, v);
@@ -1841,25 +1862,40 @@ impl Renderer {
     /// Whether view `id` is still accumulating anti-aliasing samples: the shell should draw it
     /// again even though nothing changed.
     pub fn accumulating(&self, id: u64) -> bool {
-        self.views.get(&id).is_some_and(|v| v.history.as_ref().is_some_and(|(f, _)| f.shade.taa && f.kind == ViewKind::Scene) && v.samples + 1 < TAA_SAMPLES)
+        self.views.get(&id).is_some_and(|v| v.history.as_ref().is_some_and(|(f, _, _)| f.shade.taa && f.kind == ViewKind::Scene) && v.samples + 1 < TAA_SAMPLES)
     }
 
     /// Render `frame` into its offscreen target (and regenerate dirty mips). A 3D frame with
     /// `shade.taa` that repeats the previous one adds a jittered sample to the average instead,
     /// and renders nothing once [`TAA_SAMPLES`] are in.
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, frame: &Frame) {
+        self.prepare_camera(device, queue, encoder, frame, None);
+    }
+
+    /// Render one coherent camera into its private view targets; None retains the mono path.
+    pub fn prepare_camera(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, frame: &Frame, eye: Option<&EyeCamera>) {
         self.resolve_pending(device);
         self.generate_mips(device, encoder);
+        self.prepare_ready(device, queue, encoder, frame, eye);
+    }
+
+    fn prepare_ready(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, frame: &Frame, eye: Option<&EyeCamera>) {
         let rev = self.content_rev;
         let sample = match self.views.get(&frame.view_id) {
-            Some(v) if frame.shade.taa && frame.kind == ViewKind::Scene && v.history.as_ref().is_some_and(|(f, r)| *r == rev && f == frame) => v.samples + 1,
+            Some(v)
+                if frame.shade.taa
+                    && frame.kind == ViewKind::Scene
+                    && v.history.as_ref().is_some_and(|(f, r, camera)| *r == rev && f == frame && camera.as_ref() == eye) =>
+            {
+                v.samples + 1
+            }
             _ => 0,
         };
         if sample >= TAA_SAMPLES {
             return;
         }
         let aspect = frame.size[0].max(1) as f32 / frame.size[1].max(1) as f32;
-        let mut vp = frame.camera.view_proj(aspect);
+        let mut vp = eye.map_or_else(|| frame.camera.view_proj(aspect), |eye| eye.view_projection());
         if sample > 0 {
             // Sub-pixel jitter in clip space: a box filter over the pixel once averaged.
             let (jx, jy) = (halton(sample, 2) - 0.5, halton(sample, 3) - 0.5);
@@ -1898,8 +1934,9 @@ impl Renderer {
         let radius = self.mesh.as_ref().map_or(1.0, |m| m.radius);
         // Background rays come from a perspective camera even in orthographic views (an ortho
         // ray grid would show a single flat environment color).
-        let bg_vp = OrbitCamera { ortho: false, ..frame.camera }.view_proj(aspect);
-        let e = frame.camera.eye();
+        let background = OrbitCamera { ortho: false, ..frame.camera };
+        let bg_vp = eye.map_or_else(|| background.view_proj(aspect), |eye| eye.background_view_projection(background.proj(aspect)));
+        let e = eye.map_or_else(|| frame.camera.eye(), |eye| eye.eye);
         // Scene effects (3D material view; they need float targets for depths and signed light).
         let scene_fx = !data && frame.kind == ViewKind::Scene && self.hdr_format == HDR_FORMAT && self.mesh.is_some();
         let dof = s.dof.filter(|_| scene_fx);
@@ -1952,7 +1989,7 @@ impl Renderer {
         queue.write_buffer(&v.post_buf, 0, bytemuck::bytes_of(&post));
         upload_overlay(device, queue, v, &frame.overlay, (!data).then_some(s.exposure_ev));
         v.ready = true;
-        v.history = Some((frame.clone(), rev));
+        v.history = Some((frame.clone(), rev, eye.copied()));
         v.samples = sample;
         let Some(v) = self.views.get(&frame.view_id) else { return };
         let Some(globals_bg) = v.globals_bg.as_ref() else { return };

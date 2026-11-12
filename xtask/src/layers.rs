@@ -137,7 +137,7 @@ pub fn from_metadata(meta: &Value) -> Result<Vec<Crate>, String> {
                     Some("build") => DepKind::Build,
                     _ => DepKind::Normal,
                 };
-                let workspace = members.contains(&name.as_str()) || d["path"].is_string();
+                let workspace = members.contains(&name.as_str());
                 Dep { name, kind, workspace }
             })
             .collect();
@@ -216,5 +216,24 @@ mod tests {
         assert!(compose.deps[0].workspace && !compose.deps[1].workspace);
         assert_eq!(compose.deps[2].kind, Dev);
         assert!(check(&g).is_empty());
+    }
+
+    #[test]
+    fn external_path_libraries_are_not_workspace_members() {
+        let meta = serde_json::json!({"packages": [
+            {"name":"texturecraft-core", "dependencies":[]},
+            {"name":"texturecraft-render", "dependencies":[
+                {"name":"texturecraft-core", "kind":null, "path":"/fixture/app/crates/core"},
+                {"name":"craft-stereo-camera", "kind":null, "path":"/fixture/shared/crates/stereo-camera"}
+            ]}
+        ]});
+        let graph = from_metadata(&meta).unwrap();
+        assert!(check(&graph).is_empty(), "a sibling shared library is external, not an unknown app crate");
+        let renderer = graph.iter().find(|c| c.name == "texturecraft-render").unwrap();
+        assert!(renderer.deps[0].workspace);
+        assert!(!renderer.deps[1].workspace);
+        let mut forbidden = meta;
+        forbidden["packages"][1]["dependencies"][1]["name"] = serde_json::json!("egui");
+        assert!(!check(&from_metadata(&forbidden).unwrap()).is_empty(), "an external path must still obey the UI-toolkit ban");
     }
 }

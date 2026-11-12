@@ -33,6 +33,9 @@ pub use project::{
     TextureSet, TileGrid, ToneMapping, UDIM_RANGE, udim_at,
 };
 
+/// Existing per-axis viewport render cap, shared by view commands and the renderer.
+pub const MAX_VIEW_SIDE: u32 = 8192;
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum CoreError {
     #[error("no layer with id {}", .0.0)]

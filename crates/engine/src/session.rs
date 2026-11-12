@@ -340,6 +340,8 @@ pub struct Session {
     pub selected: BTreeMap<usize, LayerId>,
     pub target: StackTarget,
     pub camera: OrbitCamera,
+    /// Program view choices, kept across projects and never saved in the document.
+    pub stereo: crate::stereo_cmds::Settings,
     pub view: ViewMode,
     /// The live bake preview while the app bakes (see [`crate::bake_preview`]).
     pub bake_preview: Option<crate::bake_preview::BakePreview>,
@@ -407,6 +409,7 @@ impl Session {
             selected,
             target: StackTarget::Content,
             camera,
+            stereo: Default::default(),
             view: ViewMode::Material,
             bake_preview: None,
             viewport: Vec2::new(1280.0, 800.0),
@@ -433,6 +436,7 @@ impl Session {
     /// user's export presets and project templates.
     pub fn switch_to(&mut self, mut next: Session) {
         next.viewport = self.viewport;
+        next.stereo = self.stereo;
         next.export_presets = std::mem::take(&mut self.export_presets);
         next.templates = std::mem::take(&mut self.templates);
         *self = next;

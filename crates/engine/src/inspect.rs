@@ -189,6 +189,7 @@ pub fn session(s: &Session) -> Value {
         "view": s.view.label(),
         "bakePreview": crate::bake_preview::preview_json(s),
         "camera": crate::view_cmds::camera_json(s),
+        "stereo": s.stereo,
         "display": s.doc.project.display,
         "history": { "undo": s.undo_label(), "redo": s.redo_label(), "depth": s.history_labels().len() },
         "memoryBytes": s.memory().total(),

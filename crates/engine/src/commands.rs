@@ -64,6 +64,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(crate::path_tool::specs());
         v.extend(crate::view_cmds::specs());
         v.extend(crate::camera_cmds::specs());
+        v.extend(crate::stereo_cmds::specs());
         v.extend(crate::quick_mask::specs());
         v.extend(crate::set_cmds::specs());
         v.extend(crate::meshmap_cmds::specs());

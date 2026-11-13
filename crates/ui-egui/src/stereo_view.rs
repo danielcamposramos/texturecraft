@@ -223,6 +223,7 @@ impl CallbackTrait for NativeCallback {
         if let Some(sync) = self.sync.take() {
             gpu.apply_sync(device, queue, sync);
         }
+        gpu.report_pending();
         let mut mailbox = self.mailbox.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(request) = mailbox.request.clone() else {
             for id in EYES {
@@ -302,4 +303,58 @@ pub fn display_settings() -> Result<(), String> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::SceneSync;
+    use std::sync::atomic::AtomicBool;
+    use texturecraft_engine::compose::DisplayKind;
+
+    #[test]
+    #[ignore = "requires an isolated software Vulkan device"]
+    fn idle_native_view_reports_a_failed_upload() {
+        let mut h = texturecraft_render::headless::Headless::new().unwrap();
+        assert_eq!(std::env::var("TEXTURECRAFT_TEST_GPU").as_deref(), Ok("software"));
+        assert!(h.adapter_name.to_lowercase().contains("llvmpipe"), "{}", h.adapter_name);
+        h.renderer.set_mesh(&h.device, &h.queue, &texturecraft_engine::geom::primitives::cube(2.0), 37);
+        let info = h.device.adapter_info();
+        assert_eq!(info.device_type, wgpu::DeviceType::Cpu);
+        assert_eq!(info.backend, wgpu::Backend::Vulkan);
+        h.renderer.set_texture_sets(&h.device, &h.queue, &[((128, 128), 0)], 1);
+        let revision = h.renderer.content_rev();
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        assert_eq!(adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+        let (limited, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: wgpu::Limits { max_texture_dimension_2d: 64, ..Default::default() },
+            ..Default::default()
+        }))
+        .unwrap();
+        let kind = DisplayKind::BaseColor;
+        let bytes: Vec<u8> = (0..64 * 64 * kind.bytes_per_texel()).map(|i| (i % 251) as u8).collect();
+        // The bound world stays on its original device; only this allocation attempt is limited.
+        h.renderer.upload_tile(&limited, &queue, 0, kind, 0, 0, &bytes);
+        assert_eq!(h.renderer.content_rev(), revision, "a rejected growth did not change the bound world");
+        let frame = Frame {
+            view_id: crate::viewport::VIEW_3D,
+            size: [32, 32],
+            kind: ViewKind::Scene,
+            camera: Default::default(),
+            shade: Default::default(),
+            visible: vec![true],
+            overlay: vec![],
+        };
+        let request = Request { frame, budget: Budget { sunk: 0.0, popped: 0.0 }, mesh_id: 37 };
+        let mailbox = Arc::new(Mutex::new(Mailbox { request: Some(request.clone()), encoded: Some((request, revision)), ..Default::default() }));
+        let ctx = egui::Context::default();
+        let reports = Arc::new(Mutex::new(crate::gpu::GpuReports::default()));
+        let mut resources = CallbackResources::default();
+        resources.insert(GpuState { renderer: h.renderer, reset: Arc::new(AtomicBool::new(false)), reports: reports.clone(), ctx: ctx.clone() });
+        let callback = NativeCallback { sync: Arc::new(SceneSyncSlot::new(SceneSync::default(), Arc::new(AtomicBool::new(false)))), mailbox, ctx };
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        callback.finish_prepare(&h.device, &h.queue, &mut encoder, &mut resources);
+        assert_eq!(reports.lock().unwrap().memory, vec![0], "idle rendering must still deliver an upload failure");
+    }
 }

@@ -357,6 +357,10 @@ pub struct SceneSyncSlot {
 }
 
 impl SceneSyncSlot {
+    pub(crate) fn new(sync: SceneSync, lost: Arc<AtomicBool>) -> Self {
+        Self { sync: Mutex::new(Some(sync)), lost }
+    }
+
     pub fn take(&self) -> Option<SceneSync> {
         self.sync.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
@@ -379,7 +383,7 @@ impl GpuLink {
     }
 
     pub fn remember_sync(&mut self, frame: u64, sync: SceneSync) -> Arc<SceneSyncSlot> {
-        let slot = Arc::new(SceneSyncSlot { sync: Mutex::new(Some(sync)), lost: self.lost.clone() });
+        let slot = Arc::new(SceneSyncSlot::new(sync, self.lost.clone()));
         self.scene_sync = Some((frame, slot.clone()));
         slot
     }

@@ -109,16 +109,16 @@ pub struct GpuTracer {
     params: wgpu::Buffer,
     post: wgpu::Buffer,
     post_stride: u32,
-    geometry: Option<Geometry>,
-    env: Option<EnvGpu>,
-    materials: Option<Materials>,
+    geometry: Option<Arc<Geometry>>,
+    env: Option<Arc<EnvGpu>>,
+    materials: Option<Arc<Materials>>,
     acc: Option<Accum>,
     /// Keep the preceding size so motion/full-resolution switches can reuse allocations.
     spare_acc: Option<Accum>,
     /// How many sets of accumulation buffers were allocated (for tests).
     #[cfg(test)]
     acc_allocations: u32,
-    scene: Option<SceneConst>,
+    scene: Option<Arc<SceneConst>>,
     bind: Option<wgpu::BindGroup>,
     samples: u32,
 }
@@ -354,13 +354,13 @@ impl GpuTracer {
             for (what, b) in [("BVH", nodes.len()), ("triangle list", tris.len()), ("vertex list", verts.len())] {
                 fits(what, b * 16)?;
             }
-            self.geometry = Some(scoped(device, "GPU path tracing: mesh upload", || Geometry {
+            self.geometry = Some(Arc::new(scoped(device, "GPU path tracing: mesh upload", || Geometry {
                 mesh: scene.mesh.clone(),
                 tri_set: scene.tri_set.clone(),
                 nodes: buffer(device, "tc_trace_nodes", bytemuck::cast_slice(&nodes)),
                 tris: buffer(device, "tc_trace_tris", bytemuck::cast_slice(&tris)),
                 verts: buffer(device, "tc_trace_verts", bytemuck::cast_slice(&verts)),
-            })?);
+            })?));
             self.bind = None;
         }
         if !self.env.as_ref().is_some_and(|e| Arc::ptr_eq(&e.image, &scene.env)) {
@@ -403,10 +403,10 @@ impl GpuTracer {
                     light,
                 }
             })?;
-            self.env = Some(env);
+            self.env = Some(Arc::new(env));
             self.bind = None;
         }
-        self.scene = Some(SceneConst {
+        self.scene = Some(Arc::new(SceneConst {
             spec_gloss: scene.spec_gloss,
             eps: scene.eps,
             sigma: scene.scatter_sigma,
@@ -414,7 +414,7 @@ impl GpuTracer {
             heights: scene.sets.iter().map(|s| s.height_strength).collect(),
             ior: scene.ior,
             lens: scene.lens.map_or([0.0; 2], |[focus, aperture]| [focus, aperture.max(0.0) * scene.radius]),
-        });
+        }));
         Ok(())
     }
 
@@ -444,8 +444,11 @@ impl GpuTracer {
         let mut arrays = Vec::with_capacity(KINDS);
         for (k, kind) in DisplayKind::ALL.into_iter().enumerate() {
             let size = sets.iter().filter_map(|s| s.get(k)).fold((1, 1), |(w, h), t| (t.width().max(w), t.height().max(h)));
-            let reuse =
-                old.as_ref().and_then(|m| m.arrays.get(k)).filter(|(t, _)| (t.width(), t.height(), t.depth_or_array_layers()) == (size.0, size.1, layers));
+            let reuse = old
+                .as_ref()
+                .filter(|m| Arc::strong_count(m) == 1)
+                .and_then(|m| m.arrays.get(k))
+                .filter(|(t, _)| (t.width(), t.height(), t.depth_or_array_layers()) == (size.0, size.1, layers));
             let (tex, view) = match reuse {
                 Some(a) => a.clone(),
                 None => scoped(device, "GPU path tracing: material textures", || {
@@ -503,8 +506,28 @@ impl GpuTracer {
             })
             .collect();
         info.push([1.0, 1.0, 0.0]);
-        self.materials = Some(Materials { rev, arrays, info });
+        self.materials = Some(Arc::new(Materials { rev, arrays, info }));
         Ok(true)
+    }
+
+    /// Borrow one already prepared immutable world; never borrow camera or history buffers.
+    pub(crate) fn share_scene_from(&mut self, source: &Self) {
+        let same = |a: &Option<Arc<Materials>>, b: &Option<Arc<Materials>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        // Geometry and environment may have changed at the same material revision.
+        if !same(&self.materials, &source.materials)
+            || self.geometry.as_ref().zip(source.geometry.as_ref()).is_none_or(|(a, b)| !Arc::ptr_eq(a, b))
+            || self.env.as_ref().zip(source.env.as_ref()).is_none_or(|(a, b)| !Arc::ptr_eq(a, b))
+        {
+            self.bind = None;
+        }
+        self.geometry.clone_from(&source.geometry);
+        self.env.clone_from(&source.env);
+        self.materials.clone_from(&source.materials);
+        self.scene.clone_from(&source.scene);
     }
 
     /// Start over at `width × height`, keeping the active render intact if allocation fails.
@@ -578,6 +601,39 @@ impl GpuTracer {
         settings: &TraceSettings,
         spp: u32,
     ) -> bool {
+        self.pass_camera(device, queue, encoder, cam, settings, spp, None)
+    }
+
+    /// Trace a coherent physical eye, with this owner's private uniform and accumulation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pass_eye(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        cam: &OrbitCamera,
+        eye: &craft_stereo_camera::EyeCamera,
+        settings: &TraceSettings,
+        spp: u32,
+    ) -> bool {
+        if eye.rays().is_err() {
+            return false;
+        }
+        let same = self.acc.as_ref().is_some_and(|acc| eye.eye == cam.eye() && eye.view_projection() == cam.view_proj(acc.width as f32 / acc.height as f32));
+        self.pass_camera(device, queue, encoder, cam, settings, spp, if same { None } else { Some(eye) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pass_camera(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        cam: &OrbitCamera,
+        settings: &TraceSettings,
+        spp: u32,
+        eye: Option<&craft_stereo_camera::EyeCamera>,
+    ) -> bool {
         let (Some(acc), Some(geo), Some(env), Some(mat), Some(sc)) = (&self.acc, &self.geometry, &self.env, &self.materials, &self.scene) else { return false };
         let bind = self.bind.get_or_insert_with(|| {
             let mut entries = vec![
@@ -594,7 +650,7 @@ impl GpuTracer {
             device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("tc_trace"), layout: &self.trace_bgl, entries: &entries })
         });
         let (w, h) = (acc.width, acc.height);
-        let inv_vp = cam.view_proj(w as f32 / h as f32).inverse();
+        let inv_vp = eye.map_or_else(|| cam.view_proj(w as f32 / h as f32), |eye| eye.view_projection()).inverse();
         let (sin, cos) = sc.rotation.sin_cos();
         let head = Head {
             inv_vp: inv_vp.to_cols_array(),
@@ -603,7 +659,7 @@ impl GpuTracer {
             cfg: [settings.bounces, u32::from(sc.spec_gloss), u32::from(env.light), (mat.info.len() - 1) as u32],
             env: [sin, cos, 0.0, 0.0],
             sigma: sc.sigma.extend(0.0).to_array(),
-            eye: cam.eye().extend(1.0).to_array(),
+            eye: eye.map_or_else(|| cam.eye(), |eye| eye.eye).extend(1.0).to_array(),
             lens: [if sc.lens[0] > 0.0 { sc.lens[0] } else { cam.distance }, sc.lens[1], sc.ior, 0.0],
         };
         let mut sets = [[0.0f32; 4]; 256];
@@ -854,6 +910,92 @@ mod tests {
         headless.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
 
         bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
+    }
+
+    #[test]
+    fn stereo_trace_views_share_world_and_keep_queued_uniforms_private() {
+        use crate::trace_pair::{GpuTracePair, TracePairFrame};
+        let (mut h, _) = gpu().expect("stereo tracing requires a real software GPU adapter");
+        let mut scene = sphere_scene(&mut h, crate::ibl::environment("Studio Contrast", 32), &WHITE);
+        scene.lens = Some([4.0, 0.1]);
+        let scene = Arc::new(scene);
+        let frame = TracePairFrame {
+            scene: scene.clone(),
+            camera: camera(),
+            size: [32, 24],
+            budget: crate::stereo::Budget { sunk: 2.0, popped: 2.0 },
+            settings: TraceSettings::default(),
+            display: crate::trace::TraceDisplay { exposure: 1.0, aces: false, env_opacity: 1.0, denoise: true },
+            max_samples: 3,
+            epoch: "one immutable sphere".into(),
+        };
+        let mut pair = GpuTracePair::new(&h.device).unwrap();
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &frame).unwrap());
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(pair.samples(), [1, 1]);
+        let [left, right] = pair.test_views();
+        assert!(Arc::ptr_eq(left.geometry.as_ref().unwrap(), right.geometry.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(left.env.as_ref().unwrap(), right.env.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(left.materials.as_ref().unwrap(), right.materials.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(left.scene.as_ref().unwrap(), right.scene.as_ref().unwrap()));
+        let queued = [accumulation(&h, left), accumulation(&h, right)];
+        assert_ne!(queued[0], queued[1], "a real second eye is not a copy of the first");
+        for (i, eye) in frame.cameras().unwrap().eyes.iter().enumerate() {
+            let mut control = GpuTracer::new(&h.device).unwrap();
+            control.share_scene_from(left);
+            let mut encoder = h.device.create_command_encoder(&Default::default());
+            control.reset(&h.device, &mut encoder, 32, 24).unwrap();
+            assert!(control.pass_eye(&h.device, &h.queue, &mut encoder, &frame.camera, eye, &frame.settings, 1));
+            h.queue.submit([encoder.finish()]);
+            assert_eq!(queued[i], accumulation(&h, &control), "each queued eye equals its independent submission");
+            let output = GpuTracer::output_texture(&h.device, 32, 24);
+            let mut encoder = h.device.create_command_encoder(&Default::default());
+            assert!(control.resolve(&h.device, &h.queue, &mut encoder, &frame.display, &output.create_view(&Default::default())));
+            h.queue.submit([encoder.finish()]);
+            let expected = crate::readback::Readback::blocking(&h.device, &h.queue, &output).unwrap();
+            let actual = crate::readback::Readback::blocking(&h.device, &h.queue, &pair.outputs().unwrap()[i]).unwrap();
+            assert_eq!(actual, expected, "each eye's private denoising and post state matches its independent resolve");
+        }
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &frame).unwrap());
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(pair.samples(), [2, 2]);
+        let mut new_frame = frame.clone();
+        new_frame.epoch = "new composition".into();
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &new_frame).unwrap());
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(pair.samples(), [1, 1], "the composition epoch resets both histories together");
+        // A new material revision must not overwrite textures retained by the previous scene.
+        let mut held = GpuTracer::new(&h.device).unwrap();
+        held.share_scene_from(&pair.test_views()[0]);
+        let previous_materials = held.materials.as_ref().unwrap().clone();
+        let eye = new_frame.cameras().unwrap().eyes[0];
+        let mut black = scene.sets[0].composite.clone();
+        let base = black.channels.get_mut(&Channel::BaseColor).unwrap();
+        for y in 0..64 {
+            for x in 0..64 {
+                base.set(x, y, &[0, 0, 0]);
+            }
+        }
+        for (tx, ty) in all_tiles(64, 64) {
+            for kind in DisplayKind::ALL {
+                h.renderer.upload_tile(&h.device, &h.queue, 0, kind, tx, ty, &tile_bytes(&black, &BakedMaps::default(), kind, tx, ty));
+            }
+        }
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        h.renderer.prepare_trace_resources(&h.device, &mut encoder);
+        assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &new_frame).unwrap());
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(pair.samples(), [1, 1], "a material revision resets both histories before the next pair");
+        assert!(!Arc::ptr_eq(&previous_materials, pair.test_views()[0].materials.as_ref().unwrap()));
+        assert_ne!(accumulation(&h, &pair.test_views()[0]), queued[0], "the new scene actually contains the black material");
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        held.reset(&h.device, &mut encoder, 32, 24).unwrap();
+        assert!(held.pass_eye(&h.device, &h.queue, &mut encoder, &new_frame.camera, &eye, &new_frame.settings, 1));
+        h.queue.submit([encoder.finish()]);
+        assert!(accumulation(&h, &held) == queued[0], "a retained immutable scene must still trace its original white material");
     }
 
     /// Two cached sizes reuse cleared buffers, and leaving Rendering mode releases both.

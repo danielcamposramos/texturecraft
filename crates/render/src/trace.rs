@@ -158,6 +158,32 @@ impl TraceScene {
         texturecraft_geom::Ray { origin, dir: (focal - origin).normalize_or(ray.dir) }
     }
 
+    fn camera_ray_eye(
+        &self,
+        cam: &OrbitCamera,
+        ndc: Vec2,
+        rng: &mut Rng,
+        grid: craft_stereo_camera::RayGrid,
+        position: Vec3,
+    ) -> Option<texturecraft_geom::Ray> {
+        let r = grid.ray(ndc.to_array())?;
+        let ray = texturecraft_geom::Ray { origin: r.origin, dir: r.direction };
+        let Some([focus, aperture]) = self.lens else { return Some(ray) };
+        let lens = aperture.max(0.0) * self.radius;
+        let fwd = cam.forward();
+        let along = ray.dir.dot(fwd);
+        if lens <= 0.0 || along <= 1e-6 {
+            return Some(ray);
+        }
+        let depth = if focus > 0.0 { focus } else { cam.distance };
+        let focal = ray.origin + ray.dir * ((depth - (ray.origin - position).dot(fwd)) / along);
+        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(fwd);
+        let (r, phi) = (lens * rng.next().sqrt(), TAU * rng.next());
+        let origin = ray.origin + (right * phi.cos() + up * phi.sin()) * r;
+        Some(texturecraft_geom::Ray { origin, dir: (focal - origin).normalize_or(ray.dir) })
+    }
+
     /// World direction to environment space.
     fn to_env(&self, d: Vec3) -> Vec3 {
         let (s, c) = self.env_rotation.sin_cos();
@@ -308,12 +334,22 @@ pub struct Tracer {
     /// First row of the pass in progress (see [`Tracer::pass_rows`]).
     row: u32,
     acc: Vec<Px>,
+    invalid_ray: bool,
 }
 
 impl Tracer {
     pub fn new(width: u32, height: u32) -> Tracer {
         let (w, h) = (width.clamp(1, 8192), height.clamp(1, 8192));
-        Tracer { width: w, height: h, samples: 0, row: 0, acc: vec![Px::default(); (w * h) as usize] }
+        Tracer { width: w, height: h, samples: 0, row: 0, invalid_ray: false, acc: vec![Px::default(); (w * h) as usize] }
+    }
+
+    /// Fallible allocation for a paired owner that must create both views before publishing.
+    pub fn try_new(width: u32, height: u32) -> Result<Self, String> {
+        let (w, h) = (width.clamp(1, 8192), height.clamp(1, 8192));
+        let mut acc = Vec::new();
+        acc.try_reserve_exact((w * h) as usize).map_err(|e| format!("could not allocate the CPU trace view: {e}"))?;
+        acc.resize((w * h) as usize, Px::default());
+        Ok(Self { width: w, height: h, samples: 0, row: 0, invalid_ray: false, acc })
     }
 
     /// Add one sample per pixel.
@@ -325,7 +361,41 @@ impl Tracer {
     /// new sample then counts in [`Tracer::samples`]). Lets a single-threaded caller spread a
     /// pass over several frames.
     pub fn pass_rows(&mut self, scene: &TraceScene, cam: &OrbitCamera, settings: &TraceSettings, rows: u32) -> bool {
+        self.pass_rows_view(scene, cam, settings, rows, None)
+    }
+
+    /// Add samples from one coherent eye, with this view's own accumulation and lens history.
+    pub fn pass_eye(&mut self, scene: &TraceScene, cam: &OrbitCamera, eye: craft_stereo_camera::EyeCamera, settings: &TraceSettings) -> Result<(), String> {
+        while !self.pass_rows_eye(scene, cam, eye, settings, self.height)? {}
+        Ok(())
+    }
+
+    /// A cancellable row slice; only a completed pass increases this view's sample count.
+    pub fn pass_rows_eye(
+        &mut self,
+        scene: &TraceScene,
+        cam: &OrbitCamera,
+        eye: craft_stereo_camera::EyeCamera,
+        settings: &TraceSettings,
+        rows: u32,
+    ) -> Result<bool, String> {
+        let grid = eye.rays().map_err(|e| e.to_string())?;
+        let view =
+            if eye.eye == cam.eye() && eye.view_projection() == cam.view_proj(self.width as f32 / self.height as f32) { None } else { Some((grid, eye.eye)) };
+        let complete = self.pass_rows_view(scene, cam, settings, rows, view);
+        if self.invalid_ray { Err("the eye projection produced a non-finite trace ray".into()) } else { Ok(complete) }
+    }
+
+    fn pass_rows_view(
+        &mut self,
+        scene: &TraceScene,
+        cam: &OrbitCamera,
+        settings: &TraceSettings,
+        rows: u32,
+        eye: Option<(craft_stereo_camera::RayGrid, Vec3)>,
+    ) -> bool {
         let (w, h, pass) = (self.width, self.height, self.samples);
+        let invalid = std::sync::atomic::AtomicBool::new(false);
         let aspect = w as f32 / h as f32;
         let (y0, y1) = (self.row, self.row.saturating_add(rows.max(1)).min(h));
         let span = self.acc.get_mut(y0 as usize * w as usize..y1 as usize * w as usize).unwrap_or_default();
@@ -334,7 +404,16 @@ impl Tracer {
             for (x, px) in row.iter_mut().enumerate() {
                 let mut rng = Rng::new(x as u32, y as u32, pass);
                 let ndc = Vec2::new((x as f32 + rng.next()) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + rng.next()) / h as f32 * 2.0);
-                let ray = scene.camera_ray(cam, ndc, aspect, &mut rng);
+                let ray = match eye {
+                    Some((grid, position)) => match scene.camera_ray_eye(cam, ndc, &mut rng, grid, position) {
+                        Some(ray) => ray,
+                        None => {
+                            invalid.store(true, std::sync::atomic::Ordering::Relaxed);
+                            continue;
+                        }
+                    },
+                    None => scene.camera_ray(cam, ndc, aspect, &mut rng),
+                };
                 match trace(scene, ray.origin, ray.dir, settings, &mut rng) {
                     Some(s) => {
                         px.hit += s.radiance;
@@ -348,6 +427,7 @@ impl Tracer {
                 }
             }
         });
+        self.invalid_ray |= invalid.load(std::sync::atomic::Ordering::Relaxed);
         if y1 >= h {
             self.row = 0;
             self.samples += 1;
@@ -359,6 +439,11 @@ impl Tracer {
     }
 
     /// Tone-mapped sRGB pixels, row-major from the top.
+    #[cfg(test)]
+    pub(crate) fn test_linear_mean(&self) -> Vec<[f32; 3]> {
+        self.acc.iter().map(|px| ((px.hit + px.env) / self.samples.max(1) as f32).to_array()).collect()
+    }
+
     pub fn rgba8(&self, d: &TraceDisplay) -> Vec<u8> {
         let n = self.samples.max(1) as f32;
         let (w, h) = (self.width as f32, self.height as f32);
@@ -1346,5 +1431,43 @@ mod tests {
         let (pinhole, focused, blurred) = (soft_edge(None), soft_edge(Some([4.0 - 0.25, 0.1])), soft_edge(Some([20.0, 0.1])));
         assert!(blurred > 3 * pinhole.max(10), "out of focus: {pinhole} -> {blurred} edge pixels");
         assert!(focused < pinhole + pinhole / 2 + 10, "the silhouette (about the focus depth) stays sharp: {pinhole} -> {focused}");
+    }
+    #[test]
+    fn stereo_lenses_share_the_central_focus_plane() {
+        use crate::stereo::Budget;
+        use crate::trace_pair::TracePairFrame;
+        let mesh = Arc::new(texturecraft_geom::primitives::sphere(1.0, 16, 8));
+        let bvh = Arc::new(Bvh::new(&mesh));
+        let mut scene = TraceScene::new(mesh, bvh, vec![], Arc::new(crate::ibl::environment("Studio Contrast", 32)), 0.0);
+        scene.lens = Some([4.0, 0.1]);
+        let scene = Arc::new(scene);
+        let cam = OrbitCamera { distance: 4.0, yaw: 0.0, pitch: 0.0, ..Default::default() };
+        let frame = TracePairFrame {
+            scene: scene.clone(),
+            camera: cam,
+            size: [640, 360],
+            budget: Budget { sunk: 24.0, popped: 12.0 },
+            settings: TraceSettings::default(),
+            display: TraceDisplay { exposure: 1.0, aces: false, env_opacity: 1.0, denoise: false },
+            max_samples: 1,
+            epoch: "one focused world".into(),
+        };
+        let pair = frame.cameras().unwrap();
+        assert!(pair.baseline > 0.0);
+        let point = Vec3::new(0.2, 0.1, 0.0);
+        let mut aperture_offsets = Vec::new();
+        for eye in pair.eyes {
+            let clip = eye.view_projection() * point.extend(1.0);
+            let ndc = (clip.truncate() / clip.w).truncate();
+            let grid = eye.rays().unwrap();
+            let pinhole = grid.ray(ndc.to_array()).unwrap();
+            let ray = scene.camera_ray_eye(&cam, ndc, &mut Rng::new(17, 9, 3), grid, eye.eye).unwrap();
+            let forward = cam.forward();
+            let focus = ray.origin + ray.dir * ((4.0 - (ray.origin - cam.eye()).dot(forward)) / ray.dir.dot(forward));
+            assert!((focus - point).length() < 1e-4, "both physical eyes focus on one central plane: {focus:?}");
+            aperture_offsets.push(ray.origin - pinhole.origin);
+        }
+        assert!(aperture_offsets[0].length() > 0.0);
+        assert!((aperture_offsets[0] - aperture_offsets[1]).length() < 1e-5, "equal aperture radius and deterministic paired sample");
     }
 }

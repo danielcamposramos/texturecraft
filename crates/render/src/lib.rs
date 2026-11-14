@@ -30,6 +30,7 @@ pub mod renderer;
 pub mod set_highlight;
 mod subdivide;
 pub mod trace;
+pub mod trace_pair;
 mod uv_seam_gpu;
 
 pub use bake_visualization::BakeVisualization;

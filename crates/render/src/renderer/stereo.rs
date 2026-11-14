@@ -144,6 +144,12 @@ impl Renderer {
         .map_err(|e| e.to_string())
     }
 
+    /// Finish one scene upload before a traced pair copies its immutable material maps.
+    pub fn prepare_trace_resources(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        self.resolve_pending(device);
+        self.generate_mips(device, encoder);
+    }
+
     /// Resolve uploads once, then draw both cameras of one frame into private targets.
     /// Apply the scene sync first. The two IDs must differ from each other and the ordinary
     /// frame's ID; each owns its screen-space effects and temporal history.

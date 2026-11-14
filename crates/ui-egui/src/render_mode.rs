@@ -259,7 +259,7 @@ fn render_size(rect: Rect) -> (u32, u32) {
 }
 
 /// Build a scene while retaining unchanged geometry and the decoded environment.
-fn trace_scene(app: &TextureCraftApp) -> TraceScene {
+pub(crate) fn trace_scene(app: &TextureCraftApp) -> TraceScene {
     let session = &app.session;
     let display = &session.doc.project.display;
     let sets: Vec<TraceSet> = session
@@ -308,11 +308,11 @@ fn trace_scene(app: &TextureCraftApp) -> TraceScene {
     TraceScene::for_display_env(mesh, bvh, sets, display, env)
 }
 
-fn settings(app: &TextureCraftApp) -> TraceSettings {
+pub(crate) fn settings(app: &TextureCraftApp) -> TraceSettings {
     TraceSettings { bounces: app.ui.render.bounces }
 }
 
-fn display(app: &TextureCraftApp) -> TraceDisplay {
+pub(crate) fn display(app: &TextureCraftApp) -> TraceDisplay {
     TraceDisplay { denoise: app.ui.render.denoise, ..TraceDisplay::from_display(&app.session.doc.project.display) }
 }
 
@@ -329,7 +329,7 @@ fn work(app: &TextureCraftApp, size: (u32, u32)) -> Work {
 
 /// What the traced scene depends on. `composites`: the texture-set composites too (their
 /// revisions bump with every composited chunk, so while textures load this changes every frame).
-fn scene_key(session: &texturecraft_engine::Session, composites: bool) -> String {
+pub(crate) fn scene_key(session: &texturecraft_engine::Session, composites: bool) -> String {
     let revisions: Vec<u64> = if composites { session.caches.iter().map(|cache| cache.revision).collect() } else { Vec::new() };
     let sets: Vec<_> = session.doc.project.texture_sets.iter().map(|set| (set.material, set.atlas_height_strength())).collect();
 
@@ -859,4 +859,10 @@ impl RenderView {
 pub fn stop(app: &mut TextureCraftApp) {
     drop_gpu(app);
     app.render = RenderView::default();
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+pub(crate) fn stereo_cpu(app: &TextureCraftApp, device: &wgpu::Device) -> bool {
+    let key = gpu_scene_key(&app.session);
+    app.ui.render.cpu || !GpuTracer::supported(device) || app.render.gpu_error.as_ref().is_some_and(|(failed, _)| *failed == key)
 }

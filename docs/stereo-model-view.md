@@ -2,7 +2,12 @@
 
 The native Unix edition offers Enable 3D, Render resolution per eye and Desktop Display Settings in the Viewport menu.
 The separate Stereo View is a read-only real-time model companion; the ordinary model viewport retains navigation, editing and picking.
-It does not claim to show Rendering mode's final path-traced result.
+In Rendering mode it follows the existing CPU or GPU tracing choice and quality settings.
+Both views trace one immutable scene through parallel off-axis cameras, including the existing central focus plane for depth of field.
+Each eye owns its uniforms, accumulation, sample counter, denoising and output.
+Only complete equal-sample pairs are shown; scene, camera, resolution, quality and live depth changes invalidate both histories together.
+A cancelled CPU worker retires before its replacement starts, and GPU readbacks finish for both eyes before presentation.
+Native-window feedback remains polled after convergence, so resizing can change the budget without a control request.
 
 The default render grid follows the ordinary model viewport's rounded physical pixel edges, preserving its current sampling.
 Before that viewport maps, its existing scripted viewport size at the current UI scale supplies the grid.
@@ -28,3 +33,8 @@ The shared window owns the native declaration, feedback and display connection.
 
 The desktop-free `o232-scene-renderer` subject contains the shared-camera renderer API, inspectable engine choices and the sibling-path architecture classifier correction.
 Only the edition branch adds the native stereo window and its UI controls.
+
+`ui.inspect` exposes `stereo.shown` for a completed traced pair: backend, native size, samples and primary rays per eye, shared scene identity, GPU material revision, camera and native depth budget.
+The metadata describes the pair shown, not a partially accumulated next pass.
+`viewport.screenshot` remains the ordinary raster tool; use `ui.screenshot` to record the visible Rendering-mode UI.
+The paired tracing API lives in the renderer and has no desktop dependency; the native companion uses the shared window host.

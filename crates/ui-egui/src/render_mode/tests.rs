@@ -347,3 +347,94 @@ fn loading_textures_are_taken_in_at_a_limited_rate() {
 fn nothing_traced_yet_shows_the_placeholder() {
     assert!(!show_image(false, 0));
 }
+
+/// A complete Rendering-mode UI control on identical inputs and actual completed samples.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[ignore = "requires the isolated software GPU and SCENE5_TEXTURE_CONTROL output"]
+fn scene5_rendering_ui_with_controlled_diagnostics() {
+    use crate::{
+        TextureCraftApp,
+        state::{Mode, ViewLayout},
+    };
+    use egui_kittest::Harness;
+    use serde_json::json;
+    use texturecraft_engine::{execute, sample_session};
+    let _language = crate::i18n::TEST_LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let model = std::env::var("SCENE3_MODEL").expect("SCENE3_MODEL is required");
+    let output = std::path::PathBuf::from(std::env::var_os("SCENE5_TEXTURE_CONTROL").expect("SCENE5_TEXTURE_CONTROL is required"));
+    let cpu = std::env::var("SCENE5_TEXTURE_CPU").expect("SCENE5_TEXTURE_CPU must be 0 or 1");
+    assert!(cpu == "0" || cpu == "1");
+    std::fs::create_dir_all(&output).unwrap();
+    let mut session = sample_session(128, 16).unwrap();
+    execute(&mut session, "file.new", &json!({"mesh":model,"resolution":128})).unwrap();
+    for (index, color) in ["#ff0000", "#0000ff"].into_iter().enumerate() {
+        execute(&mut session, "textureSet.select", &json!({"ts":index})).unwrap();
+        execute(&mut session, "textureSet.channel.add", &json!({"channel":"emissive"})).unwrap();
+        execute(&mut session, "layer.add.fill", &json!({"color":"#000000","metallic":1.0,"roughness":0.5,"name":(["near","far"][index])})).unwrap();
+        execute(&mut session, "layer.fill.set", &json!({"channel":"emissive","color":color,"enabled":true})).unwrap();
+    }
+    execute(&mut session, "camera.set", &json!({"yaw":0,"pitch":0,"distance":5,"fov":40,"target":[0,0,0]})).unwrap();
+    let imported = execute(&mut session, "resource.import", &json!({"path":"/mnt/build/craft-apps-232/fixtures/scene5-texture-trace/black.png"})).unwrap();
+    let name = imported.get("name").and_then(|v| v.as_str()).expect("resource.import must return its actual resource name");
+    execute(
+        &mut session,
+        "display.set",
+        &json!({"environment":format!("resource:{name}"),"opacity":1.0,"exposure":0.0,"toneMapping":"linear","taa":false,"shadows":false}),
+    )
+    .unwrap();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1000.0, 680.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_eframe(|context| TextureCraftApp::new(context, session));
+    let adapter = harness.state().render_state.as_ref().unwrap().adapter.get_info();
+    assert_eq!(adapter.backend, texturecraft_render::wgpu::Backend::Vulkan);
+    assert_eq!(adapter.device_type, texturecraft_render::wgpu::DeviceType::Cpu);
+    harness.state_mut().ui.layout = ViewLayout::Only3D;
+    harness.state_mut().ui.prefs.language = "en".into();
+    harness.state_mut().ui.mode = Mode::Rendering;
+    harness.state_mut().ui.render.max_samples = 4;
+    harness.state_mut().ui.render.bounces = 1;
+    harness.state_mut().ui.render.denoise = false;
+    harness.state_mut().ui.render.cpu = cpu == "1";
+    for _ in 0..60 {
+        harness.state_mut().ui_ms = 0.0;
+        harness.run_steps(1);
+        harness.render().unwrap();
+    }
+    let full_grid = (harness.state().viewport_rect.width().max(16.0) as u32, harness.state().viewport_rect.height().max(16.0) as u32);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while harness.state().render.samples != 4
+        || harness.state().session.pending_tiles() != 0
+        || harness.state().session.caches.iter().any(|cache| !cache.upload.is_empty())
+        || (cpu == "0" && harness.state().render.gpu.as_ref().is_none_or(|view| view.size != full_grid || view.held.is_some()))
+    {
+        assert!(std::time::Instant::now() < until, "the ordinary trace did not finish four samples per pixel");
+        harness.state_mut().ui_ms = 0.0;
+        harness.run_steps(1);
+        harness.render().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    for _ in 0..3 {
+        harness.state_mut().ui_ms = 0.0;
+        harness.state_mut().render.elapsed = 0.0;
+        harness.run_steps(1);
+        harness.render().unwrap();
+    }
+    assert_eq!(harness.state().render.samples, 4);
+    let first = harness.render().unwrap();
+    first.save(output.join("whole-ui.png")).unwrap();
+    harness.state_mut().ui_ms = 0.0;
+    harness.state_mut().render.elapsed = 0.0;
+    harness.run_steps(1);
+    let second = harness.render().unwrap();
+    assert_eq!(first.as_raw(), second.as_raw(), "every ordinary UI pixel must be stable with the two diagnostic clocks controlled");
+    second.save(output.join("whole-ui-stable.png")).unwrap();
+    assert_eq!(first.dimensions(), (1000, 680));
+    std::fs::write(
+        output.join("samples.json"),
+        serde_json::to_vec_pretty(&json!({"samples":harness.state().render.samples,"cpu":cpu=="1","adapter":adapter.name})).unwrap(),
+    )
+    .unwrap();
+}

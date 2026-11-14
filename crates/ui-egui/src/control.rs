@@ -104,8 +104,13 @@ pub fn handle(app: &mut TextureCraftApp, ctx: &egui::Context, method: &str, p: &
         "session.inspect" => ok(texturecraft_engine::inspect::session(&app.session)),
         "ui.inspect" => {
             let r = app.viewport_rect;
+            #[cfg(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))]
+            let stereo = app.stereo.as_ref().map(|view| view.inspect());
+            #[cfg(not(all(unix, not(target_os = "macos"), not(target_arch = "wasm32"))))]
+            let stereo: Option<Value> = None;
             ok(json!({
                 "state": app.ui,
+                "stereo": stereo,
                 "viewport": [r.min.x, r.min.y, r.width(), r.height()],
                 "fps": app.fps,
                 "uiMs": app.ui_ms,

@@ -1,4 +1,4 @@
-//! A read-only model companion, sharing the ordinary viewport's uploaded world.
+//! A read-only scene companion using the active raster or path-traced renderer.
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,12 @@ use crate::TextureCraftApp;
 use crate::gpu::{GpuState, SceneSyncSlot};
 use crate::i18n::{tr, trf};
 
+mod trace_input;
+mod trace_worker;
+use texturecraft_render::trace_pair::{GpuTracePair, TracePairFrame};
+use trace_input::TraceInput;
+use trace_worker::Worker;
+
 const EYES: [u64; 2] = [u64::MAX, u64::MAX - 1];
 type Pixels = (u32, u32, Vec<u8>);
 
@@ -19,12 +25,15 @@ struct Request {
     frame: Frame,
     budget: Budget,
     mesh_id: u64,
+    trace: Option<TracePairFrame>,
 }
 
 struct Pending {
     reads: [Readback; 2],
     mapped: bool,
     pixels: [Option<Pixels>; 2],
+    summary: Option<TraceSummary>,
+    trace_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -33,6 +42,7 @@ struct Mailbox {
     encoded: Option<(Request, u64)>,
     pending: Option<Pending>,
     error: Option<String>,
+    tracer: Option<GpuTracePair>,
 }
 
 #[derive(Default)]
@@ -42,9 +52,59 @@ pub struct ModelView {
     mailbox: Arc<Mutex<Mailbox>>,
     opened: Option<Instant>,
     warned: bool,
+    trace_input: TraceInput,
+    trace_frame: Option<TracePairFrame>,
+    cpu: Option<Worker>,
+    shown: Option<TraceSummary>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceSummary {
+    backend: &'static str,
+    size: [u32; 2],
+    samples_per_eye: [u32; 2],
+    primary_rays: [u64; 2],
+    scene: String,
+    material_revision: Option<u64>,
+    budget: [f32; 2],
+    camera: texturecraft_engine::geom::OrbitCamera,
+}
+
+fn trace_summary(frame: &TracePairFrame, backend: &'static str, samples: [u32; 2], material_revision: Option<u64>) -> TraceSummary {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    frame.epoch.hash(&mut hash);
+    TraceSummary {
+        backend,
+        size: frame.size,
+        samples_per_eye: samples,
+        primary_rays: samples.map(|n| u64::from(n) * u64::from(frame.size[0]) * u64::from(frame.size[1])),
+        scene: format!("{:016x}", hash.finish()),
+        material_revision,
+        budget: [frame.budget.sunk, frame.budget.popped],
+        camera: frame.camera,
+    }
 }
 
 impl ModelView {
+    pub fn inspect(&self) -> serde_json::Value {
+        serde_json::json!({"shown":self.shown,"pending":self.cpu.as_ref().is_some_and(|job|!job.finished())
+            || self.mailbox.lock().unwrap_or_else(PoisonError::into_inner).pending.is_some()})
+    }
+
+    fn retire_cpu(&mut self) -> Result<bool, String> {
+        if let Some(job) = &mut self.cpu {
+            job.cancel();
+            if !job.finished() {
+                return Ok(false);
+            }
+            job.join()?;
+        }
+        self.cpu = None;
+        Ok(true)
+    }
+
     pub fn tick(&mut self, app: &mut TextureCraftApp, ctx: &egui::Context) {
         if let Some(gpu) = &app.gpu {
             let reports = gpu.take_reports();
@@ -68,6 +128,12 @@ impl ModelView {
                 gpu.renderer.drop_view(id);
             }
         }
+        if let Some(job) = &self.cpu {
+            job.cancel();
+        }
+        self.trace_frame = None;
+        self.trace_input = TraceInput::default();
+        self.shown = None;
         self.window = None;
         *self.mailbox.lock().unwrap_or_else(PoisonError::into_inner) = Mailbox::default();
         self.opened = None;
@@ -95,7 +161,32 @@ impl ModelView {
             return Ok(());
         }
         let Some(rs) = &app.render_state else { return Err(tr("No GPU renderer available").into()) };
+        let limits = window.depth_limits().map(|l| l.native_pixels(size[0]));
+        let (sunk, popped) = limits.unwrap_or((0.0, 0.0));
+        if app.ui.mode == crate::state::Mode::Rendering {
+            self.trace_frame = Some(self.trace_input.frame(app, size, Budget { sunk: sunk as f32, popped: popped as f32 }));
+        } else {
+            self.trace_frame = None;
+            self.trace_input = TraceInput::default();
+        }
+        // Read the world revision before the mailbox: callbacks hold the renderer first.
+        let material_revision = rs.renderer.read().callback_resources.get::<GpuState>().map(|gpu| gpu.renderer.content_rev());
         let mut mailbox = self.mailbox.lock().unwrap_or_else(PoisonError::into_inner);
+        // A completed readback belongs to its full request, including camera and live depth.
+        if let Some(pending) = &mailbox.pending {
+            let valid = if app.ui.mode == crate::state::Mode::Rendering {
+                let expected = if crate::render_mode::stereo_cpu(app, &rs.device) { None } else { self.trace_frame.as_ref().map(TracePairFrame::key) };
+                expected.is_some()
+                    && pending.trace_key == expected
+                    && pending.summary.as_ref().is_some_and(|shown| shown.material_revision == material_revision)
+            } else {
+                pending.trace_key.is_none()
+            };
+            if !valid {
+                mailbox.pending = None;
+            }
+        }
+
         if let Some(error) = mailbox.error.take() {
             return Err(error);
         }
@@ -122,11 +213,36 @@ impl ModelView {
                 if !window.show(pack([left.0, left.1], &left.2, &right.2)?) {
                     return Err(tr("The stereo window closed before the pair was shown.").into());
                 }
+                self.shown = pending.summary.clone();
                 mailbox.pending = None;
             }
         }
-        let limits = window.depth_limits().map(|l| l.native_pixels(size[0]));
-        let (sunk, popped) = limits.unwrap_or((0.0, 0.0));
+
+        if let Some(frame) = self.trace_frame.clone() {
+            let cpu = crate::render_mode::stereo_cpu(app, &rs.device);
+            if cpu {
+                mailbox.request = None;
+                mailbox.tracer = None;
+                mailbox.pending = None;
+                mailbox.encoded = None;
+                drop(mailbox);
+                if limits.is_none() && !self.warned && self.opened.is_some_and(|at| at.elapsed() >= Duration::from_secs(3)) {
+                    self.warned = true;
+                    app.toast(tr("Stereo depth is unavailable on this desktop; showing the flat model."), false);
+                }
+                if limits.is_some() {
+                    self.warned = false;
+                }
+                return self.cpu_frame(ctx, frame);
+            }
+        }
+        drop(mailbox);
+        // A replacement waits for the cancelled CPU worker before allocating new eye state.
+        if !self.retire_cpu()? {
+            ctx.request_repaint();
+            return Ok(());
+        }
+        let mut mailbox = self.mailbox.lock().unwrap_or_else(PoisonError::into_inner);
         let bake = crate::viewport::bake_visualization(app);
         let mut shade = crate::viewport::shade(app);
         shade.bake = bake;
@@ -142,6 +258,7 @@ impl ModelView {
             },
             budget: Budget { sunk: sunk as f32, popped: popped as f32 },
             mesh_id: app.session.mesh_id,
+            trace: self.trace_frame.clone(),
         });
         drop(mailbox);
         let aux = match app.session.view {
@@ -171,6 +288,43 @@ impl ModelView {
         if limits.is_some() {
             self.warned = false;
         }
+        ctx.request_repaint_after(Duration::from_millis(16));
+        Ok(())
+    }
+
+    fn cpu_frame(&mut self, ctx: &egui::Context, frame: TracePairFrame) -> Result<(), String> {
+        let key = frame.key();
+        let obsolete = self.cpu.as_ref().is_some_and(|job| job.key != key || job.cancelled());
+        if obsolete && !self.retire_cpu()? {
+            ctx.request_repaint();
+            return Ok(());
+        }
+        if self.cpu.is_none() {
+            self.cpu = Some(Worker::start(key, frame.clone(), ctx.clone())?);
+        }
+        let Some(job) = &mut self.cpu else {
+            return Err("the stereo trace worker could not be created".into());
+        };
+        if let Some(completed) = job.take() {
+            let completed = completed?;
+            if completed.samples[0] == 0 || completed.samples[0] != completed.samples[1] {
+                return Err("the traced stereo views do not have equal completed sample counts".into());
+            }
+            let Some(window) = &self.window else {
+                return Ok(());
+            };
+            if !window.show(pack(frame.size, &completed.pixels[0], &completed.pixels[1])?) {
+                return Err(tr("The stereo window closed before the pair was shown.").into());
+            }
+            self.shown = Some(trace_summary(&frame, "cpu", completed.samples, None));
+        }
+        if job.finished() {
+            job.join()?;
+        }
+        if self.shown.as_ref().is_none_or(|shown| shown.samples_per_eye[0] < frame.max_samples) {
+            ctx.request_repaint();
+        }
+        // Native-window feedback can change after both traces finish.
         ctx.request_repaint_after(Duration::from_millis(16));
         Ok(())
     }
@@ -234,6 +388,47 @@ impl CallbackTrait for NativeCallback {
         if mailbox.pending.is_some() || gpu.renderer.mesh_id() != Some(request.mesh_id) {
             return Vec::new();
         }
+        if let Some(frame) = &request.trace {
+            mailbox.encoded = None;
+            gpu.renderer.prepare_trace_resources(device, encoder);
+            for id in EYES {
+                gpu.renderer.drop_view(id);
+            }
+            let result = (|| -> Result<Option<Pending>, String> {
+                if mailbox.tracer.is_none() {
+                    mailbox.tracer = Some(GpuTracePair::new(device)?);
+                }
+                let Some(tracer) = &mut mailbox.tracer else {
+                    return Err("the stereo tracer could not be created".into());
+                };
+                if !tracer.advance(device, queue, encoder, &gpu.renderer, frame)? {
+                    return Ok(None);
+                }
+                let samples = tracer.samples();
+                if samples[0] == 0 || samples[0] != samples[1] {
+                    return Err("the traced stereo views do not have equal completed sample counts".into());
+                }
+                let Some(outputs) = tracer.outputs() else {
+                    return Err("the traced stereo views have no output images".into());
+                };
+                let reads = outputs.each_ref().map(|out| Readback::new(device, encoder, out));
+                Ok(Some(Pending {
+                    reads,
+                    mapped: false,
+                    pixels: [None, None],
+                    summary: Some(trace_summary(frame, "gpu", samples, tracer.material_revision())),
+                    trace_key: Some(frame.key()),
+                }))
+            })();
+            match result {
+                Ok(pending) => mailbox.pending = pending,
+                Err(error) => mailbox.error = Some(error),
+            }
+            gpu.report_pending();
+            self.ctx.request_repaint();
+            return Vec::new();
+        }
+        mailbox.tracer = None;
         let key = (request.clone(), gpu.renderer.content_rev());
         if mailbox.encoded.as_ref() == Some(&key) && !EYES.into_iter().any(|id| gpu.renderer.accumulating(id)) && !gpu.renderer.awaiting_gpu() {
             return Vec::new();
@@ -242,7 +437,7 @@ impl CallbackTrait for NativeCallback {
             let left = gpu.renderer.copy_view(device, encoder, EYES[0]);
             let right = gpu.renderer.copy_view(device, encoder, EYES[1]);
             match (left, right) {
-                (Some(left), Some(right)) => Ok(Pending { reads: [left, right], mapped: false, pixels: [None, None] }),
+                (Some(left), Some(right)) => Ok(Pending { reads: [left, right], mapped: false, pixels: [None, None], summary: None, trace_key: None }),
                 _ => Err(tr("Could not read the stereo views from the GPU.").into()),
             }
         });
@@ -346,7 +541,7 @@ mod tests {
             visible: vec![true],
             overlay: vec![],
         };
-        let request = Request { frame, budget: Budget { sunk: 0.0, popped: 0.0 }, mesh_id: 37 };
+        let request = Request { frame, budget: Budget { sunk: 0.0, popped: 0.0 }, mesh_id: 37, trace: None };
         let mailbox = Arc::new(Mutex::new(Mailbox { request: Some(request.clone()), encoded: Some((request, revision)), ..Default::default() }));
         let ctx = egui::Context::default();
         let reports = Arc::new(Mutex::new(crate::gpu::GpuReports::default()));

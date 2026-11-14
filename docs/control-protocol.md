@@ -116,6 +116,11 @@ keeps its state in a throwaway file.
 | `debug.paintTest` | `{from: [x, y], to: [x, y], frames?: 120}` | Paints a straight stroke through the real frame loop (viewport pixels, one point per frame) for performance work |
 | `debug.frames` | | Frame timing since the last call (then cleared): `{frames, intervalMs, uiMs, syncMs, logicMs}` each `{avg, p95, max}`; `syncMs` is compositing plus display tile conversion, `logicMs` input, control requests and scripted strokes before the UI is built; `worst` breaks down the slowest frame; `strokeEnd` lists the frame that committed a `debug.paintTest` stroke and the one after it (null without one) |
 
+The native stereo edition also includes `stereo` in `ui.inspect`.
+Its `shown` member is null before a traced pair is presented; afterward it records `backend`, `size`, `samplesPerEye`, `primaryRays`, `scene`, `materialRevision`, `camera` and `budget` for that complete pair.
+`pending` reports an active CPU worker or GPU readback.
+The ordinary `viewport.screenshot` command remains a raster render even in Rendering mode; `ui.screenshot` records the actual visible UI.
+
 Example session:
 
 ```text

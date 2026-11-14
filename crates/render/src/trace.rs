@@ -439,6 +439,11 @@ impl Tracer {
     }
 
     /// Tone-mapped sRGB pixels, row-major from the top.
+    #[cfg(test)]
+    pub(crate) fn test_linear_mean(&self) -> Vec<[f32; 3]> {
+        self.acc.iter().map(|px| ((px.hit + px.env) / self.samples.max(1) as f32).to_array()).collect()
+    }
+
     pub fn rgba8(&self, d: &TraceDisplay) -> Vec<u8> {
         let n = self.samples.max(1) as f32;
         let (w, h) = (self.width as f32, self.height as f32);

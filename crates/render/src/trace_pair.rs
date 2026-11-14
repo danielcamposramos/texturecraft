@@ -144,6 +144,14 @@ impl CpuTracePair {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_linear_means(&self) -> Result<[Vec<[f32; 3]>; 2], String> {
+        if self.building.is_some() || self.eyes[0].samples == 0 || self.eyes[0].samples != self.eyes[1].samples {
+            return Err("linear means require two complete equal-sample views".into());
+        }
+        Ok(self.eyes.each_ref().map(Tracer::test_linear_mean))
+    }
+
     pub fn rgba8(&self) -> Result<[Vec<u8>; 2], String> {
         if self.building.is_some() || self.eyes[0].samples == 0 || self.eyes[0].samples != self.eyes[1].samples {
             return Err("a CPU stereo pair needs two completed equal sample counts".into());

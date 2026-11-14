@@ -998,6 +998,114 @@ mod tests {
         assert!(accumulation(&h, &held) == queued[0], "a retained immutable scene must still trace its original white material");
     }
 
+    #[test]
+    fn stereo_gpu_zero_budget_preserves_the_original_mono_trace() {
+        use crate::trace_pair::{GpuTracePair, TracePairFrame};
+        let (mut h, _) = gpu().expect("stereo tracing requires a real software GPU adapter");
+        let mut scene = sphere_scene(&mut h, crate::ibl::environment("Studio Contrast", 32), &WHITE);
+        scene.lens = Some([4.0, 0.1]);
+        let frame = TracePairFrame {
+            scene: Arc::new(scene),
+            camera: camera(),
+            size: [32, 24],
+            budget: crate::stereo::Budget { sunk: 0.0, popped: 0.0 },
+            settings: TraceSettings::default(),
+            display: TraceDisplay { exposure: 0.4, aces: true, env_opacity: 1.0, denoise: true },
+            max_samples: 2,
+            epoch: "the unchanged central scene".into(),
+        };
+        let mut pair = GpuTracePair::new(&h.device).unwrap();
+        let mut depth_frame = frame.clone();
+        depth_frame.budget = crate::stereo::Budget { sunk: 2.0, popped: 1.0 };
+        let mut encoder = h.device.create_command_encoder(&Default::default());
+        h.renderer.prepare_trace_resources(&h.device, &mut encoder);
+        assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &depth_frame).unwrap());
+        h.queue.submit([encoder.finish()]);
+        assert_eq!(pair.samples(), [1, 1]);
+        for n in 1..=2 {
+            let mut encoder = h.device.create_command_encoder(&Default::default());
+            h.renderer.prepare_trace_resources(&h.device, &mut encoder);
+            assert!(pair.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &frame).unwrap());
+            h.queue.submit([encoder.finish()]);
+            assert_eq!(pair.samples(), [n, n]);
+        }
+        let mut mono = GpuTracer::new(&h.device).unwrap();
+        let expected = mono.render(&h.device, &h.queue, &h.renderer, &frame.scene, &frame.camera, &frame.settings, &frame.display, frame.size, 2).unwrap();
+        for image in pair.outputs().unwrap() {
+            let actual = crate::readback::Readback::blocking(&h.device, &h.queue, image).unwrap();
+            assert_eq!(actual, expected, "zero budget must preserve every original mono sample and denoised pixel");
+        }
+    }
+
+    /// Real noisy transport, kept separate from the emissive geometry witness.
+    #[test]
+    #[ignore = "requires a software GPU and TEXTURECRAFT_STEREO_CONVERGENCE_DIR"]
+    fn stereo_progressive_convergence_records_both_completed_eyes() {
+        use crate::trace_pair::{CpuTracePair, GpuTracePair, TracePairFrame};
+        let output = std::path::PathBuf::from(
+            std::env::var_os("TEXTURECRAFT_STEREO_CONVERGENCE_DIR").expect("TEXTURECRAFT_STEREO_CONVERGENCE_DIR must name a fresh output directory"),
+        );
+        assert!(!output.exists(), "use a fresh convergence output directory");
+        std::fs::create_dir_all(&output).unwrap();
+        let (mut h, _) = gpu().expect("convergence requires a real software GPU adapter");
+        let scene = Arc::new(sphere_scene(&mut h, crate::ibl::environment("Studio Contrast", 32), &WHITE));
+        let frame = TracePairFrame {
+            scene: scene.clone(),
+            camera: camera(),
+            size: [64, 48],
+            budget: crate::stereo::Budget { sunk: 2.0, popped: 1.0 },
+            settings: TraceSettings { bounces: 3 },
+            display: TraceDisplay { exposure: 0.4, aces: true, env_opacity: 1.0, denoise: false },
+            max_samples: 256,
+            epoch: "one lit white sphere under Studio Contrast".into(),
+        };
+        let steps = [1, 8, 32, 256];
+        let save = |backend: &str, n: u32, rgba: [Vec<u8>; 2], linear: [Vec<[f32; 3]>; 2]| {
+            for (eye, (rgba, linear)) in rgba.into_iter().zip(linear).enumerate() {
+                assert_eq!(rgba.len(), 64 * 48 * 4);
+                assert_eq!(linear.len(), 64 * 48);
+                assert!(linear.iter().flatten().all(|v| v.is_finite()));
+                std::fs::write(output.join(format!("{backend}-{n}-eye{eye}.rgba8")), rgba).unwrap();
+                let bytes: Vec<u8> = linear.into_iter().flat_map(|p| p.into_iter().flat_map(f32::to_le_bytes)).collect();
+                std::fs::write(output.join(format!("{backend}-{n}-eye{eye}.rgb32f")), bytes).unwrap();
+            }
+        };
+        let mut cpu = CpuTracePair::new(frame.clone()).unwrap();
+        let mut cpu_counts = Vec::new();
+        let mut gpu_counts = Vec::new();
+        for n in 1..=256 {
+            assert!(cpu.advance().unwrap());
+            assert_eq!(cpu.samples(), [n, n]);
+            if steps.contains(&n) {
+                save("cpu", n, cpu.rgba8().unwrap(), cpu.test_linear_means().unwrap());
+                cpu_counts.push(cpu.samples());
+            }
+        }
+        let mut gpu = GpuTracePair::new(&h.device).unwrap();
+        for n in 1..=256 {
+            let mut encoder = h.device.create_command_encoder(&Default::default());
+            h.renderer.prepare_trace_resources(&h.device, &mut encoder);
+            assert!(gpu.advance(&h.device, &h.queue, &mut encoder, &h.renderer, &frame).unwrap());
+            h.queue.submit([encoder.finish()]);
+            assert_eq!(gpu.samples(), [n, n]);
+            if steps.contains(&n) {
+                let rgba = gpu.outputs().unwrap().each_ref().map(|out| crate::readback::Readback::blocking(&h.device, &h.queue, out).unwrap().2);
+                let linear = gpu.test_views().each_ref().map(|t| {
+                    let a = t.acc.as_ref().unwrap();
+                    let hit = read_buffer(&h, &a.acc[0]);
+                    let env = read_buffer(&h, &a.acc[3]);
+                    hit.into_iter().zip(env).map(|(a, b)| std::array::from_fn(|c| (a[c] + b[c]) / n as f32)).collect()
+                });
+                save("gpu", n, rgba, linear);
+                gpu_counts.push(gpu.samples());
+            }
+        }
+        let baseline = frame.cameras().unwrap().baseline;
+        std::fs::write(output.join("counts.json"),format!(
+            "{{\"size\":[64,48],\"samples\":[1,8,32,256],\"completed_samples_per_eye\":{cpu_counts:?},\"gpu_completed_samples_per_eye\":{gpu_counts:?},\"baseline\":{baseline},\"scene\":\"one immutable lit white sphere / Studio Contrast / bounces 3\",\"denoise\":false,\"scope\":\"renderer convergence, not a compositor capture\"}}\n"
+        )).unwrap();
+    }
+
     /// Two cached sizes reuse cleared buffers, and leaving Rendering mode releases both.
     #[test]
     fn switching_between_two_sizes_reuses_the_accumulation_buffers() {
